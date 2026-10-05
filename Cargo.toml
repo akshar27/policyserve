@@ -1,0 +1,14 @@
+[package]
+name = "policyserve-system1"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "system1"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5.51", features = ["derive"] }
+libc = "0.2.190"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
