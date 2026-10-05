@@ -62,7 +62,7 @@ architecture around the model, not another model.
 
 ### Functional
 - Accept a natural-language task instruction plus a simulated camera
-  frame and proprioceptive state; drive a simulated robot arm (PyBullet)
+  frame and proprioceptive state; drive a simulated robot arm (MuJoCo)
   toward completing it.
 - Run a **System 2** reasoner on its own cadence (default 2 Hz,
   configurable) that reads the latest frame/instruction/state and
@@ -99,6 +99,18 @@ architecture around the model, not another model.
   boundary a real robot's driver would sit behind, but driving real
   hardware is explicitly out of scope (see §4).
 
+**A real substitution made during implementation**: the original draft
+of this doc specified PyBullet for the sim. PyBullet's bundled, vendored
+zlib fails to compile against this machine's Xcode/macOS SDK (a
+`NULL`-macro collision in a header PyBullet hasn't updated for newer
+SDKs) — a real, reproducible build failure, not a hypothetical one,
+confirmed by actually running the install rather than assumed from
+PyBullet's reputation. MuJoCo (DeepMind/Google's physics engine, with
+real prebuilt wheels and no local compilation step) replaced it
+everywhere in this document; it's also the more current choice given
+2026's "Newton"/physical-AI research direction this project's own §1
+is already citing.
+
 ## 4. Scope
 
 **In scope for v1:** a simulated single-arm pick-and-place task; the
@@ -134,7 +146,7 @@ flowchart TB
         SUP --> S1[System 1: Controller<br/>50-200 Hz, hard deadline]
         S2 -->|writes| GS[(Shared Goal State<br/>non-blocking read/write)]
         S1 -->|reads, never blocks| GS
-        S1 -->|action| SIM[PyBullet Simulated Arm]
+        S1 -->|action| SIM[MuJoCo Simulated Arm]
         SIM -->|frame + proprioception| S2
         SIM -->|proprioception| S1
         S1 -->|step duration| MET[Metrics:<br/>latency histograms,<br/>deadline misses]
@@ -311,7 +323,7 @@ project is trying to keep simple.
   actually page on in a real deployment.
 - **The simulated robot reaches a singular/unsafe configuration.** The
   controller clamps commanded velocities against joint limits before
-  they ever reach the sim; a configuration PyBullet itself rejects
+  they ever reach the sim; a configuration MuJoCo itself rejects
   (self-collision) ends the task as `failed` rather than wedging the
   loop.
 - **No persistence layer.** v1 is explicitly single-process, single-
@@ -325,12 +337,12 @@ project is trying to keep simple.
 
 | Option | System 1 (hot loop) | System 2 + sim | Tradeoff |
 |---|---|---|---|
-| A: Python end-to-end | Python (asyncio or a tight `while` loop in its own thread/process) | Python (PyBullet is Python-only) | Simplest to build end-to-end; the GIL makes a *hard* 100Hz+ deadline a real engineering problem to solve honestly (multiprocessing to actually decouple the two loops, not just `async def`), which is arguably more interesting to demonstrate solving than to sidestep. |
-| B: Rust (System 1) + Python (System 2/sim) | Rust, talking to the sim over a lightweight IPC/shared-memory channel | Python (PyBullet) | The most legitimate "hard real-time" story and a second strong language credential; meaningfully more glue code to bridge a Rust loop into a Python-only physics sim cleanly. |
-| C: Go (System 1) + Python (System 2/sim) | Go | Python (PyBullet) | Similar split to B with an easier IPC story (Go's networking/concurrency primitives); Go's GC can introduce latency jitter that complicates the "hard deadline" story, though still far more deterministic than Python's GIL. |
+| A: Python end-to-end | Python (asyncio or a tight `while` loop in its own thread/process) | Python (MuJoCo is Python-only) | Simplest to build end-to-end; the GIL makes a *hard* 100Hz+ deadline a real engineering problem to solve honestly (multiprocessing to actually decouple the two loops, not just `async def`), which is arguably more interesting to demonstrate solving than to sidestep. |
+| B: Rust (System 1) + Python (System 2/sim) | Rust, talking to the sim over a lightweight IPC/shared-memory channel | Python (MuJoCo) | The most legitimate "hard real-time" story and a second strong language credential; meaningfully more glue code to bridge a Rust loop into a Python-only physics sim cleanly. |
+| C: Go (System 1) + Python (System 2/sim) | Go | Python (MuJoCo) | Similar split to B with an easier IPC story (Go's networking/concurrency primitives); Go's GC can introduce latency jitter that complicates the "hard deadline" story, though still far more deterministic than Python's GIL. |
 
 **Decision: Option B** — Rust for System 1, Python for System 2 and the
-PyBullet sim. Rationale: the deadline-enforcement story this project
+MuJoCo sim. Rationale: the deadline-enforcement story this project
 exists to prove is genuinely stronger in a language with no GC pauses
 and no GIL, and the IPC glue needed to bridge Rust↔Python is no more
 complex than the multiprocessing workaround pure Python would need

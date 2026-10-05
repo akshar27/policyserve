@@ -4,7 +4,7 @@
 
 - [ ] Rust binary skeleton: a loop that ticks at a configurable target
       rate and logs its own timing.
-- [ ] Python skeleton: a PyBullet launcher that loads a plane + a simple
+- [ ] Python skeleton: a MuJoCo launcher that loads a plane + a simple
       arm, steps physics, no control logic yet.
 - [ ] The actual riskiest unknown, proven first and in isolation: a
       shared-memory "latest value wins" channel (seqlock pattern) that
@@ -34,7 +34,7 @@
 
 ## M4 — Full loop integration: one pick-and-place task, end to end
 
-- [ ] Wire System 1 (Rust) + System 2 (Python, scripted) + the PyBullet
+- [ ] Wire System 1 (Rust) + System 2 (Python, scripted) + the MuJoCo
       sim together into one running task with a real state machine
       (approach → grasp → lift → move → place → release → done).
 - [ ] Tests: the task actually completes in sim from a few different
