@@ -329,8 +329,18 @@ project is trying to keep simple.
 | B: Rust (System 1) + Python (System 2/sim) | Rust, talking to the sim over a lightweight IPC/shared-memory channel | Python (PyBullet) | The most legitimate "hard real-time" story and a second strong language credential; meaningfully more glue code to bridge a Rust loop into a Python-only physics sim cleanly. |
 | C: Go (System 1) + Python (System 2/sim) | Go | Python (PyBullet) | Similar split to B with an easier IPC story (Go's networking/concurrency primitives); Go's GC can introduce latency jitter that complicates the "hard deadline" story, though still far more deterministic than Python's GIL. |
 
-No recommendation locked in yet — this is the call to make at the
-language-decision step, after this design is reviewed.
+**Decision: Option B** — Rust for System 1, Python for System 2 and the
+PyBullet sim. Rationale: the deadline-enforcement story this project
+exists to prove is genuinely stronger in a language with no GC pauses
+and no GIL, and the IPC glue needed to bridge Rust↔Python is no more
+complex than the multiprocessing workaround pure Python would need
+anyway for a real 100Hz+ deadline — so Option A doesn't actually buy
+back simplicity, only the (weaker) language story. Rust is also this
+project's second appearance in the portfolio (after QueryGuard), which
+reads as real depth rather than a one-off, and it's the single
+fastest-growing, highest-paid, scarcest-talent language in current
+market data (+67% YoY postings, $182k avg, "very high" difficulty to
+fill).
 
 ## 11. What this demonstrates on a résumé
 
