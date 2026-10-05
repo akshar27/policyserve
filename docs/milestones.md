@@ -53,19 +53,69 @@ assumed working:**
 3 Rust tests + 1 Python integration test, `fmt`/`clippy --all-targets
 -- -D warnings` clean on the Rust side.
 
-## M2 — System 1: closed-form controller + hard deadline enforcement
+## M2 — System 1: closed-form controller + hard deadline enforcement ✅ (2026-10-05)
 
-- [ ] Python skeleton: a MuJoCo launcher that loads a plane + a simple
+- [x] Python skeleton: a MuJoCo launcher that loads a plane + a simple
       arm, steps physics, no control logic yet (carried over from M1,
       deferred so M1 could prove the shared-memory handoff in true
       isolation first).
-- [ ] A closed-form controller (joint-space proportional control toward
+- [x] A closed-form controller (joint-space proportional control toward
       a target configuration — no full inverse kinematics) in Rust.
-- [ ] Hard per-step deadline enforcement with a safe fallback action
+- [x] Hard per-step deadline enforcement with a safe fallback action
       (hold position) when exceeded; every step's duration recorded.
-- [ ] Tests: the controller actually converges toward a target on a
+- [x] Tests: the controller actually converges toward a target on a
       known arm configuration; an artificially slowed-down compute path
       actually triggers the fallback and gets logged, not just assumed.
+
+`py/policyserve/models/simple_arm.xml`: a 3-joint planar arm, one
+velocity actuator per joint (so the control signal this scene expects
+is exactly the joint-velocity command System 1's controller already
+computes — no unit conversion needed when the two get wired together
+in M4). `src/controller.rs`: `ProportionalController` computes
+`clamp(kp * (target - current), ±max_velocity)` per joint independently
+(no cross-joint coupling, matching "joint-space, not task-space"
+control); `SafeController<C>` wraps *any* `JointController` with the
+hard deadline from design doc §8.2 -- a step whose compute exceeds its
+budget is logged as a miss and its action discarded for a safe
+fallback, never applied even if the compute technically finished by
+the time `step()` returns.
+
+**A real numerical-instability bug found by actually stepping the
+sim, not assumed stable from the MJCF**: the first version of
+`simple_arm.xml` (explicit per-geom `mass` overrides, the default
+semi-implicit Euler integrator) diverged within ~20 simulation steps
+under a sustained velocity command — `qpos`/`qvel` went from sane
+values to the thousands in well under half a second, confirmed by
+actually tracing `qpos`/`qvel`/`qacc` step by step rather than only
+checking the final state. The velocity actuators combined with joint
+damping form a stiff system the default integrator can't handle at
+this timestep; switching to MuJoCo's `implicitfast` integrator and
+letting MuJoCo auto-compute geom mass/inertia from density (removing
+the manual overrides) fixed it, verified by the same step-by-step
+trace and a dedicated regression test (`test_zero_velocity_command_
+does_not_blow_up_under_gravity`) that asserts sanity at every step
+across a full second of sim time, not just the end.
+
+**One real test-expectation miss, corrected after measuring rather than
+assuming**: an early version of the sim test expected a sustained
+velocity command to keep accumulating joint displacement linearly over
+300 steps. The actual (correct, physically real) behavior of this
+scene's damping/actuator combination is to settle into a new
+*equilibrium position* within well under a second rather than sustain
+indefinite velocity — confirmed by tracing `qvel` decaying back toward
+zero around step 150. The test was rewritten to check for real,
+measurable movement within the active transient window instead of a
+specific displacement after the system has already settled.
+
+The deadline-enforcement test (`a_slow_compute_triggers_the_safe_
+fallback_and_reports_its_real_duration`) wraps the real controller in a
+`SlowController` that sleeps a genuine, measured 20ms before computing,
+against a 5ms budget — proving the fallback path with an actual timing
+violation, not a mocked one, and asserting the reported `duration`
+reflects that real delay rather than trusting the branch read correctly.
+
+7 Rust tests + 5 Python tests (12 total), `fmt`/`clippy --all-targets
+-- -D warnings` clean.
 
 ## M3 — System 2: pluggable reasoner + the scripted deterministic planner
 

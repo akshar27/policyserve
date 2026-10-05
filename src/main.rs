@@ -12,6 +12,7 @@
 //! (ticks run, read-channel samples observed, timing), so the Python
 //! side of the M1 test can assert on it without scraping log output.
 
+mod controller;
 mod shm;
 
 use std::time::{Duration, Instant};
