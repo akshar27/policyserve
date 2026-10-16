@@ -1,0 +1,45 @@
+<mujoco model="pick_place_arm">
+  <!-- M3 scene: the same 3-joint planar arm as simple_arm.xml, plus a red and a blue block and a green platform
+       on the floor, and a fixed ORTHOGRAPHIC side camera. Two deliberate choices:
+         * the arm links are neutral gray (simple_arm.xml's red/green/blue links would be indistinguishable from the
+           coloured blocks to a colour-blob heuristic);
+         * the camera is orthographic, so pixel -> world (x, z) is an exact linear map, and a test can assert the
+           reasoner's recovered position against the known truth instead of trusting a calibration. -->
+  <option gravity="0 0 -9.81" timestep="0.002" integrator="implicitfast"/>
+
+  <worldbody>
+    <geom name="floor" type="plane" size="2 2 0.1" rgba="0.8 0.8 0.8 1"/>
+    <light pos="0.4 -1.5 2" dir="0 0.5 -1" diffuse="0.9 0.9 0.9" ambient="0.5 0.5 0.5" specular="0 0 0"/>
+    <camera name="front" pos="0.4 -2 0.45" xyaxes="1 0 0 0 0 1" projection="orthographic" fovy="1.2"/>
+
+    <body name="link1" pos="0 0 0.5">
+      <joint name="joint1" type="hinge" axis="0 1 0" range="-3.14159 3.14159" damping="2.0"/>
+      <geom type="capsule" size="0.05" fromto="0 0 0 0.3 0 0" rgba="0.55 0.55 0.55 1"/>
+      <body name="link2" pos="0.3 0 0">
+        <joint name="joint2" type="hinge" axis="0 1 0" range="-3.14159 3.14159" damping="1.5"/>
+        <geom type="capsule" size="0.04" fromto="0 0 0 0.25 0 0" rgba="0.45 0.45 0.45 1"/>
+        <body name="link3" pos="0.25 0 0">
+          <joint name="joint3" type="hinge" axis="0 1 0" range="-3.14159 3.14159" damping="1.0"/>
+          <geom type="capsule" size="0.03" fromto="0 0 0 0.2 0 0" rgba="0.35 0.35 0.35 1"/>
+          <site name="end_effector" pos="0.2 0 0" size="0.02"/>
+        </body>
+      </body>
+    </body>
+
+    <body name="red_block" pos="0.55 0 0.02">
+      <freejoint/>
+      <geom type="box" size="0.02 0.02 0.02" mass="0.05" rgba="0.9 0.1 0.1 1"/>
+    </body>
+    <body name="blue_block" pos="0.3 0 0.02">
+      <freejoint/>
+      <geom type="box" size="0.02 0.02 0.02" mass="0.05" rgba="0.1 0.2 0.9 1"/>
+    </body>
+    <geom name="green_platform" type="box" pos="0.2 0 0.01" size="0.07 0.1 0.01" rgba="0.1 0.8 0.1 1"/>
+  </worldbody>
+
+  <actuator>
+    <velocity name="act1" joint="joint1" kv="10"/>
+    <velocity name="act2" joint="joint2" kv="10"/>
+    <velocity name="act3" joint="joint3" kv="10"/>
+  </actuator>
+</mujoco>

@@ -117,15 +117,43 @@ reflects that real delay rather than trusting the branch read correctly.
 7 Rust tests + 5 Python tests (12 total), `fmt`/`clippy --all-targets
 -- -D warnings` clean.
 
-## M3 — System 2: pluggable reasoner + the scripted deterministic planner
+## M3 — System 2: pluggable reasoner + the scripted deterministic planner ✅ (2026-10-16)
 
-- [ ] The `Reasoner` interface; a `ScriptedReasoner` that locates a
+- [x] The `Reasoner` interface; a `ScriptedReasoner` that locates a
       named-color block via a simple color-blob heuristic on the sim's
       camera frame and produces subgoal poses for a pick/place sequence.
-- [ ] System 2's own fixed-cadence loop, writing into the shared goal
+- [x] System 2's own fixed-cadence loop, writing into the shared goal
       channel from M1.
-- [ ] Tests: correct subgoals for known scene configurations; cadence
+- [x] Tests: correct subgoals for known scene configurations; cadence
       timing respected.
+
+`py/policyserve/reasoner.py`: `Reasoner.plan(frame, instruction, proprio) -> Subgoal | Done | Failed`, an
+HSV colour-blob finder, an instruction parser ("pick up the red block and place it on the green platform"), and
+`ScriptedReasoner` with four ordered rules (cannot parse / object not visible -> `Failed`; block resting on the
+platform -> `Done`; end effector already at the block -> `place` subgoal above the platform; otherwise `reach` the
+block). `py/policyserve/goal.py` defines the 40-byte goal record that goes through the M1 seqlock channel
+(cycle, kind, x, z, monotonic timestamp). `py/policyserve/system2.py`'s `System2Loop` runs on a fixed schedule: a cycle
+that overruns the period makes the *next* one start late, with no catch-up burst and no overlap; an exception,
+malformed output or NaN leaves the published goal untouched and is counted, and N consecutive failures publish a
+`FAILED` sentinel and end the task (System 1 never depends on any of it).
+
+`py/policyserve/models/pick_place_arm.xml`: the M2 arm in neutral gray (the M2 model's red/green/blue links would be
+mistaken for blocks by a colour heuristic), a red and a blue block, a green platform, and a fixed **orthographic**
+side camera, so pixel -> world (x, z) is an exact linear map and the tests assert recovered positions against known
+truth (centroids within 1 cm; checked to <0.5 px against the camera maths).
+
+**Things found by running it, not assumed:**
+1. MuJoCo 3.14 rejects `orthographic="true"` on `<camera>`; the attribute is `projection="orthographic"`.
+2. A flaky test of my own (4 of 5 runs): the "reader thread sees goals while the loop runs" test raced the reader's last
+   poll against the loop's last write (saw cycles 0-14, expected 15). Test bug, not product bug; the final state is now
+   asserted directly from the channel, and the suite ran 8/8 clean afterwards.
+
+**Known limits, stated plainly:** colour-blob detection only works in this controlled scene (it is a determinism
+fixture, not a detector); the Rust side does not decode the goal record yet - that lands with the M4 integration;
+"carrying" is inferred from the end effector being at the block, because the 3-joint arm has no gripper until M4's state
+machine models the grasp.
+
+12 new Python tests (24 total) + 7 Rust tests; Rust `fmt`/`clippy -D warnings` unchanged and clean.
 
 ## M4 — Full loop integration: one pick-and-place task, end to end
 
