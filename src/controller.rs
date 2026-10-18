@@ -7,13 +7,8 @@
 //! architecture this project exists to prove without needing a real
 //! IK solver.
 //!
-//! Not wired into `main`'s CLI yet -- that happens in M4, once System 2
-//! (M3) exists to actually drive `target` with something other than a
-//! value a test wrote directly. Everything here is exercised by its own
-//! tests in the meantime, hence the module-level `allow` below rather
-//! than `main` pretending to use it early.
-
-#![allow(dead_code)]
+//! Wired into the control loop (`control.rs`) in M4: the Cartesian setpoint from the task state machine goes through the
+//! closed-form IK in `kinematics.rs` to a joint target, and this controller turns that into joint velocities.
 
 use std::time::{Duration, Instant};
 

@@ -39,6 +39,7 @@ class Failed:
 class Proprioception:
     ee_x: float
     ee_z: float
+    holding: bool = False   # gripper is closed on something block-sized (M4; before that "carrying" was inferred from ee position)
 
 
 class Reasoner(Protocol):
@@ -132,10 +133,12 @@ def parse_instruction(instruction: str) -> tuple[str, str] | None:
 # ----------------------------------------------------------------------------------------------- scripted reasoner
 class ScriptedReasoner:
     """Deterministic rules, in order:
-      1. cannot parse the instruction, or a named object is not visible        -> Failed(reason)
-      2. block rests on the platform (centre within its x-extent, above its top) -> Done
-      3. end effector is already at the block (within grasp_tol)                -> Subgoal(place) above the platform
-      4. otherwise                                                              -> Subgoal(reach) at the block
+      1. cannot parse the instruction, or a named object is not visible          -> Failed(reason)
+      2. block rests on the platform (centre within its x-extent, above its top)
+         and the gripper is neither holding it nor still at it                   -> Done
+      3. the gripper is holding something                                        -> Subgoal(place) above the platform
+      4. otherwise                                                               -> Subgoal(reach) at the block
+    The reasoner only says WHERE; the grasp/lift/lower/release sequencing is System 1's state machine (src/task.rs).
     """
 
     def __init__(self, camera: OrthoCamera, grasp_tol: float = 0.05, block_half: float = 0.02):
@@ -154,8 +157,9 @@ class ScriptedReasoner:
             return Failed(f"{plat_color} platform not visible")
 
         on_platform = plat.x_min <= block.x <= plat.x_max and block.z >= plat.z_max + 0.5 * self.block_half
-        if on_platform and np.hypot(proprio.ee_x - block.x, proprio.ee_z - block.z) > self.grasp_tol:
+        away = np.hypot(proprio.ee_x - block.x, proprio.ee_z - block.z) > self.grasp_tol
+        if on_platform and not proprio.holding and away:
             return Done()
-        if np.hypot(proprio.ee_x - block.x, proprio.ee_z - block.z) <= self.grasp_tol:
+        if proprio.holding:
             return Subgoal("place", plat.x, plat.z_max + self.block_half)
         return Subgoal("reach", block.x, block.z)

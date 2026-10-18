@@ -33,7 +33,7 @@
 use std::ffi::CString;
 use std::io;
 use std::ptr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering, fence};
 use std::time::{Duration, Instant};
 
 const SEQ_SIZE: usize = 8;
@@ -106,9 +106,15 @@ impl SeqLockChannel {
         assert_eq!(data.len(), self.payload_size, "payload size mismatch");
         let seq = self.seq();
         let cur = seq.load(Ordering::Relaxed);
-        seq.store(cur.wrapping_add(1), Ordering::Release);
-        unsafe {
-            ptr::copy_nonoverlapping(data.as_ptr(), self.payload_ptr(), self.payload_size);
+        seq.store(cur.wrapping_add(1), Ordering::Relaxed);
+        // The odd marker must be visible BEFORE any payload byte. A Release *store* does not give that (it only orders earlier
+        // operations before itself); a Release *fence* after the marker does. Without it, ARM64 may publish payload bytes ahead of
+        // the marker and a reader can accept a half-written value -- the M1 torn-read test caught exactly this under M4's heavier
+        // parallel test load.
+        fence(Ordering::Release);
+        let dst = self.payload_ptr();
+        for (i, b) in data.iter().enumerate() {
+            unsafe { ptr::write_volatile(dst.add(i), *b) };
         }
         seq.store(cur.wrapping_add(2), Ordering::Release);
     }
@@ -126,10 +132,15 @@ impl SeqLockChannel {
             if !s1.is_multiple_of(2) {
                 continue; // writer mid-write
             }
-            unsafe {
-                ptr::copy_nonoverlapping(self.payload_ptr(), out.as_mut_ptr(), self.payload_size);
+            let src = self.payload_ptr();
+            for (i, b) in out.iter_mut().enumerate() {
+                *b = unsafe { ptr::read_volatile(src.add(i)) };
             }
-            let s2 = seq.load(Ordering::Acquire);
+            // Mirror image of the writer's fence: the payload loads above must complete before the second sequence read. An
+            // Acquire *load* only orders later operations after itself, so on ARM64 the payload loads could otherwise slip past
+            // it and pair a stale s2 with new bytes.
+            fence(Ordering::Acquire);
+            let s2 = seq.load(Ordering::Relaxed);
             if s1 == s2 {
                 return true;
             }

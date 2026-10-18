@@ -1,0 +1,76 @@
+<mujoco model="pick_place_gripper">
+  <!-- M4 scene: a gravity-compensated 3-joint planar arm (x-z plane) whose last link hangs a two-finger parallel gripper,
+       a red and a blue block, and a green platform. Same orthographic side camera as the M3 scene, so the M3 perception code
+       works unchanged.
+
+       Geometry the Rust side (src/kinematics.rs) hard-codes, so keep both in sync:
+         base joint at (0, 0, 0.30), link1 0.30 m, link2 0.25 m, link3 (joint3 -> grip site) 0.125 m.
+       Planar convention: a link's direction is (cos a, -sin a) in (x, z) for a = sum of the joint angles so far (hinge axis +y).
+       The gripper points straight down when joint1+joint2+joint3 = pi/2.
+
+       Gripper: two fingers slide along y (the camera axis). 'gap' = clear distance between the finger pads = 0.042 + q_left + q_right
+       (0.082 open, 0.002 closed on nothing, ~0.035 closed on a block).
+       The pads are 7 cm wide (along x) for a 4 cm block, so even a few millimetres of in-hand slip never loses the grasp. -->
+  <!-- MuJoCo's default angle unit is degrees; without this the +-3.14159 joint ranges below would be +-3 DEGREES (found the
+       hard way: the arm stalled at ~0.07 rad against an invisible limit). -->
+  <compiler angle="radian"/>
+  <!-- cone="elliptic" + impratio=10: MuJoCo's default friction constraints are soft enough that a held block CREEPS through the
+       pads (it slid ~3 cm out of the grip during a gentle transport); the elliptic cone with a high impedance ratio is the
+       documented setting for grasping. -->
+  <option gravity="0 0 -9.81" timestep="0.002" integrator="implicitfast" cone="elliptic" impratio="10"/>
+
+  <default>
+    <!-- solref/solimp: stiffer than MuJoCo's defaults (0.02 s). With the defaults a held block creeps ~3.5 cm out of the pads during a
+         gentle 0.25 m/s transport (friction and torsion values made no difference; contact timestep and solref did). 0.005 s keeps
+         the slip to ~8 mm. -->
+    <geom friction="1.5 0.05 0.002" condim="4" solref="0.005 1" solimp="0.95 0.99 0.001"/>
+  </default>
+
+  <worldbody>
+    <geom name="floor" type="plane" size="2 2 0.1" rgba="0.8 0.8 0.8 1"/>
+    <light pos="0.4 -1.5 2" dir="0 0.5 -1" diffuse="0.9 0.9 0.9" ambient="0.5 0.5 0.5" specular="0 0 0"/>
+    <camera name="front" pos="0.4 -2 0.45" xyaxes="1 0 0 0 0 1" projection="orthographic" fovy="1.2"/>
+
+    <!-- gravcomp="1": every arm body is gravity-compensated, like most industrial arms. The velocity actuators have no
+         position stiffness, so without it the arm would sag under its own weight. -->
+    <body name="link1" pos="0 0 0.3" gravcomp="1">
+      <joint name="joint1" type="hinge" axis="0 1 0" range="-3.14159 3.14159" damping="2.0"/>
+      <geom type="capsule" size="0.04" fromto="0 0 0 0.3 0 0" rgba="0.55 0.55 0.55 1" density="300"/>
+      <body name="link2" pos="0.3 0 0" gravcomp="1">
+        <joint name="joint2" type="hinge" axis="0 1 0" range="-3.14159 3.14159" damping="1.5"/>
+        <geom type="capsule" size="0.035" fromto="0 0 0 0.25 0 0" rgba="0.45 0.45 0.45 1" density="300"/>
+        <body name="link3" pos="0.25 0 0" gravcomp="1">
+          <joint name="joint3" type="hinge" axis="0 1 0" range="-3.14159 3.14159" damping="1.0"/>
+          <geom type="capsule" size="0.025" fromto="0 0 0 0.08 0 0" rgba="0.35 0.35 0.35 1" density="300"/>
+          <site name="grip" pos="0.125 0 0" size="0.01" rgba="1 1 0 0"/>
+          <body name="finger_l" pos="0.125 0.025 0" gravcomp="1">
+            <joint name="finger_l" type="slide" axis="0 1 0" range="-0.02 0.02" damping="5"/>
+            <geom name="pad_l" type="box" size="0.015 0.004 0.035" rgba="0.3 0.3 0.3 1" mass="0.02"/>
+          </body>
+          <body name="finger_r" pos="0.125 -0.025 0" gravcomp="1">
+            <joint name="finger_r" type="slide" axis="0 -1 0" range="-0.02 0.02" damping="5"/>
+            <geom name="pad_r" type="box" size="0.015 0.004 0.035" rgba="0.3 0.3 0.3 1" mass="0.02"/>
+          </body>
+        </body>
+      </body>
+    </body>
+
+    <body name="red_block" pos="0.45 0 0.02">
+      <freejoint name="red_free"/>
+      <geom name="red_geom" type="box" size="0.02 0.02 0.02" mass="0.05" rgba="0.9 0.1 0.1 1"/>
+    </body>
+    <body name="blue_block" pos="0.32 0 0.02">
+      <freejoint name="blue_free"/>
+      <geom name="blue_geom" type="box" size="0.02 0.02 0.02" mass="0.05" rgba="0.1 0.2 0.9 1"/>
+    </body>
+    <geom name="green_platform" type="box" pos="0.15 0 0.01" size="0.07 0.1 0.01" rgba="0.1 0.8 0.1 1"/>
+  </worldbody>
+
+  <actuator>
+    <velocity name="act1" joint="joint1" kv="10"/>
+    <velocity name="act2" joint="joint2" kv="10"/>
+    <velocity name="act3" joint="joint3" kv="10"/>
+    <position name="grip_l" joint="finger_l" kp="400" ctrlrange="-0.02 0.02" forcerange="-12 12"/>
+    <position name="grip_r" joint="finger_r" kp="400" ctrlrange="-0.02 0.02" forcerange="-12 12"/>
+  </actuator>
+</mujoco>

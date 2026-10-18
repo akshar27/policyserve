@@ -30,10 +30,15 @@ class System2Loop:
     def __init__(self, reasoner: Reasoner, frame_fn: Callable[[], np.ndarray], proprio_fn: Callable[[], Proprioception],
                  instruction: str, goal_channel, period_s: float = 0.5, max_consecutive_failures: int = 3,
                  clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
-                 history: int = 1024):
-        self.reasoner, self.frame_fn, self.proprio_fn = reasoner, frame_fn, proprio_fn
+                 history: int = 1024, step_fn: Callable[[], int] = lambda: 0,
+                 republish_terminal: bool = False):
+        self.reasoner, self.frame_fn, self.proprio_fn, self.step_fn = reasoner, frame_fn, proprio_fn, step_fn
         self.instruction, self.channel, self.period_s = instruction, goal_channel, period_s
         self.max_consecutive_failures = max_consecutive_failures
+        # False (M3 default): the loop ends at the first DONE/FAILED. True (M4 closed loop): it keeps cycling and republishing, because
+        # System 1 only believes goals computed from frames captured after its last sequence ended -- a single DONE published a
+        # moment too early would be (correctly) ignored forever. The host stops the loop once System 1 has acted on it.
+        self.republish_terminal = republish_terminal
         self._clock, self._sleep = clock, sleep
         self.records: deque[CycleRecord] = deque(maxlen=history)
         self.cycle = 0
@@ -50,8 +55,11 @@ class System2Loop:
         t0 = self._clock()
         self.cycle += 1
         outcome = "subgoal"
+        self._frame_step = 0
         try:
-            result = self.reasoner.plan(self.frame_fn(), self.instruction, self.proprio_fn())
+            frame = self.frame_fn()
+            self._frame_step = self.step_fn()   # read right after the frame so the two stay paired
+            result = self.reasoner.plan(frame, self.instruction, self.proprio_fn())
             outcome = self._publish(result, t0)
         except Exception as e:  # noqa: BLE001 - a reasoner may fail in any way; none of them may touch System 1
             outcome = "error"
@@ -63,16 +71,18 @@ class System2Loop:
     def _publish(self, result, now: float) -> str:
         if isinstance(result, Subgoal) and result.kind in ("reach", "place") and math.isfinite(result.x) and math.isfinite(result.z):
             kind = GoalKind.REACH if result.kind == "reach" else GoalKind.PLACE
-            self.channel.write(GoalState(self.cycle, kind, result.x, result.z, now).encode())
+            self.channel.write(GoalState(self.cycle, kind, result.x, result.z, now, self._frame_step).encode())
             self.consecutive_failures = 0
+            if self.republish_terminal:
+                self.status = "running"
             return "subgoal"
         if isinstance(result, Done):
-            self.channel.write(GoalState(self.cycle, GoalKind.DONE, updated_at=now).encode())
+            self.channel.write(GoalState(self.cycle, GoalKind.DONE, updated_at=now, frame_step=self._frame_step).encode())
             self.consecutive_failures = 0
             self.status = "done"
             return "done"
         if isinstance(result, Failed):
-            self.channel.write(GoalState(self.cycle, GoalKind.FAILED, updated_at=now).encode())
+            self.channel.write(GoalState(self.cycle, GoalKind.FAILED, updated_at=now, frame_step=self._frame_step).encode())
             self.last_failure = result.reason
             self.status = "failed"
             return "failed"
@@ -86,7 +96,7 @@ class System2Loop:
         self.consecutive_failures += 1
         self.last_failure = reason
         if self.consecutive_failures >= self.max_consecutive_failures:
-            self.channel.write(GoalState(self.cycle, GoalKind.FAILED, updated_at=now).encode())
+            self.channel.write(GoalState(self.cycle, GoalKind.FAILED, updated_at=now, frame_step=self._frame_step).encode())
             self.status = "failed"
 
     # ---- fixed-cadence loop ------------------------------------------------------------------------------------
@@ -95,7 +105,7 @@ class System2Loop:
         self.status = "running"
         next_start = self._clock()
         late = False
-        while not self._stop.is_set() and self.status == "running":
+        while not self._stop.is_set() and (self.status == "running" or self.republish_terminal):
             self.run_cycle(late)
             if max_cycles is not None and self.cycle >= max_cycles:
                 break

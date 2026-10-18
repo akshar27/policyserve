@@ -12,8 +12,12 @@
 //! (ticks run, read-channel samples observed, timing), so the Python
 //! side of the M1 test can assert on it without scraping log output.
 
+mod control;
 mod controller;
+mod kinematics;
 mod shm;
+mod task;
+mod wire;
 
 use std::time::{Duration, Instant};
 
@@ -42,12 +46,33 @@ fn decode(buf: &[u8; PAYLOAD_SIZE]) -> Option<u64> {
 
 #[derive(Parser, Debug)]
 struct Args {
-    /// Channel Python writes to and this process reads from.
+    /// `harness` = the M1 shared-memory counter exchange; `control` = the M4 System 1 control loop.
+    #[arg(long, default_value = "harness")]
+    mode: String,
+    /// (harness) channel Python writes to and this process reads from.
     #[arg(long)]
-    read_channel: String,
-    /// Channel this process writes to and Python reads from.
+    read_channel: Option<String>,
+    /// (harness) channel this process writes to and Python reads from.
     #[arg(long)]
-    write_channel: String,
+    write_channel: Option<String>,
+    /// (control) System 2 -> System 1 goal record.
+    #[arg(long)]
+    goal_channel: Option<String>,
+    /// (control) sim host -> System 1 proprioception record.
+    #[arg(long)]
+    proprio_channel: Option<String>,
+    /// (control) System 1 -> sim host action record.
+    #[arg(long)]
+    action_channel: Option<String>,
+    /// (fk) comma-separated joint angles, radians.
+    #[arg(long)]
+    joints: Option<String>,
+    /// (ik) comma-separated grip-point target "x,z", metres.
+    #[arg(long)]
+    target: Option<String>,
+    /// (control) per-tick compute budget; a controller step over this is discarded for the safe fallback.
+    #[arg(long, default_value_t = 5000)]
+    deadline_us: u64,
     /// Tick rate in Hz.
     #[arg(long, default_value_t = 100)]
     rate_hz: u64,
@@ -64,20 +89,78 @@ fn main() {
         .init();
 
     let args = Args::parse();
+    match args.mode.as_str() {
+        "harness" => run_harness(&args),
+        "control" => {
+            let need = |v: &Option<String>, name: &str| {
+                v.clone()
+                    .unwrap_or_else(|| panic!("--{name} is required in control mode"))
+            };
+            let summary = control::run(&control::ControlArgs {
+                goal_channel: need(&args.goal_channel, "goal-channel"),
+                proprio_channel: need(&args.proprio_channel, "proprio-channel"),
+                action_channel: need(&args.action_channel, "action-channel"),
+                rate_hz: args.rate_hz,
+                duration_secs: args.duration_secs,
+                deadline_us: args.deadline_us,
+            });
+            println!("{}", summary.to_json());
+        }
+        // Kinematics probes: let the Python tests compare this binary's FK/IK against MuJoCo's own geometry.
+        "fk" => {
+            let q = parse_floats(
+                args.joints
+                    .as_deref()
+                    .expect("--joints required in fk mode"),
+            );
+            let (x, z) = kinematics::fk(&[q[0], q[1], q[2]]);
+            println!("{{\"x\":{x},\"z\":{z}}}");
+        }
+        "ik" => {
+            let t = parse_floats(
+                args.target
+                    .as_deref()
+                    .expect("--target required in ik mode"),
+            );
+            let (q, reachable) = kinematics::ik(t[0], t[1]);
+            println!(
+                "{{\"q\":[{},{},{}],\"reachable\":{reachable}}}",
+                q[0], q[1], q[2]
+            );
+        }
+        other => panic!("unknown --mode {other:?} (expected harness, control, fk or ik)"),
+    }
+}
+
+fn parse_floats(s: &str) -> Vec<f64> {
+    s.split(',')
+        .map(|v| v.trim().parse().expect("not a number"))
+        .collect()
+}
+
+fn run_harness(args: &Args) {
+    let read_channel = args
+        .read_channel
+        .clone()
+        .expect("--read-channel is required in harness mode");
+    let write_channel = args
+        .write_channel
+        .clone()
+        .expect("--write-channel is required in harness mode");
     let period = Duration::from_secs_f64(1.0 / args.rate_hz as f64);
     let run_for = Duration::from_secs_f64(args.duration_secs);
 
     tracing::info!(
         rate_hz = args.rate_hz,
-        read_channel = %args.read_channel,
-        write_channel = %args.write_channel,
+        read_channel = %read_channel,
+        write_channel = %write_channel,
         "system1 opening channels"
     );
     let read_chan =
-        SeqLockChannel::open_existing(&args.read_channel, PAYLOAD_SIZE, Duration::from_secs(5))
+        SeqLockChannel::open_existing(&read_channel, PAYLOAD_SIZE, Duration::from_secs(5))
             .expect("failed to open read channel (did Python create it first?)");
     let write_chan =
-        SeqLockChannel::open_existing(&args.write_channel, PAYLOAD_SIZE, Duration::from_secs(5))
+        SeqLockChannel::open_existing(&write_channel, PAYLOAD_SIZE, Duration::from_secs(5))
             .expect("failed to open write channel (did Python create it first?)");
 
     let mut ticks: u64 = 0;

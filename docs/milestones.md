@@ -155,13 +155,56 @@ machine models the grasp.
 
 12 new Python tests (24 total) + 7 Rust tests; Rust `fmt`/`clippy -D warnings` unchanged and clean.
 
-## M4 — Full loop integration: one pick-and-place task, end to end
+## M4 — Full loop integration: one pick-and-place task, end to end ✅ (2026-10-18)
 
-- [ ] Wire System 1 (Rust) + System 2 (Python, scripted) + the MuJoCo
-      sim together into one running task with a real state machine
-      (approach → grasp → lift → move → place → release → done).
-- [ ] Tests: the task actually completes in sim from a few different
-      starting arm/block configurations, not just one lucky run.
+- [x] Wire System 1 (Rust) + System 2 (Python, scripted) + the MuJoCo sim together into one running task with a real state
+      machine (approach -> descend -> grasp -> lift -> transport -> lower -> release -> retreat -> done).
+- [x] Tests: the task actually completes in sim from several different starting arm/block configurations, not one lucky run.
+
+**What exists.** Three processes/threads, three shared-memory channels (all the M1 seqlock):
+`py/policyserve/host.py` (the MuJoCo host: paced to wall-clock at 100 Hz, publishes proprioception, applies System 1's
+action, renders the camera for System 2) -> `src/control.rs` + `src/task.rs` (System 1: reads the latest proprioception
+and goal, advances the state machine, closed-form IK in `src/kinematics.rs`, per-joint P control under the M2 deadline
+wrapper, publishes the action) <- `py/policyserve/system2.py` (System 2 thread at 2 Hz: camera frame -> `ScriptedReasoner`
+-> goal). Wire formats: `src/wire.rs` / `py/policyserve/wire.py` / `goal.py`. New scene `models/pick_place_gripper.xml`:
+gravity-compensated 3-joint arm with a two-finger parallel gripper (the M2/M3 scenes are untouched).
+
+**Division of labour.** System 2 says *where* (reach (x, z) / place (x, z) / done / failed); System 1 owns *how and when*:
+the contact-sensitive sequencing (close the gripper, judge the grasp from the pad gap, notice a drop) happens inside the
+10 ms tick and never waits on System 2. Rules that keep a slow or stale System 2 harmless: a sequence is committed once
+the arm starts descending; after a sequence ends System 1 accepts only goals computed from a camera frame captured
+*after* that moment (`frame_step` in the goal record, compared against the sim step - a causal ordering that needs no shared
+clock); every phase has a timeout; a missed grasp retries twice then fails; losing the grip mid-carry aborts to a recover
+phase; the end-effector setpoint follows a speed- and acceleration-limited profile.
+
+**Results** (real, from `pytest tests/test_closed_loop.py`, 5 consecutive full runs all green):
+4 start-pose/block/platform configurations complete a clean pick-and-place (phase order asserted), in about 7-11 s of sim
+time, with 0 deadline misses, 0 grasp retries, System 1 tick compute p99 well under 2 ms of a 10 ms period; a System 2
+at 0.7 Hz instead of 2 Hz completes the same task later while System 1 keeps ticking at 100 Hz; an unparseable instruction
+makes System 2 publish `FAILED` and System 1 hold position with nothing disturbed. 20 Rust tests, 35 Python tests.
+
+**Real problems found by running it (not assumed):**
+1. **The M1 seqlock was wrong on ARM64.** The M1 torn-read test started failing intermittently once M4 added load
+   (7 of 15 runs on the old code). A Release *store* does not order the payload writes after it, and an Acquire *load*
+   does not order the payload reads before it, so a reader could accept a half-written value. Fixed with a Release fence
+   after the odd marker and an Acquire fence before the second sequence read, and volatile byte copies: 0 failures in 30 runs.
+   (The M1 write-up's "never flakes" was true only for the lighter load it was measured under.)
+2. MuJoCo's default angle unit is degrees, so `range="-3.14159 3.14159"` meant +-3 DEGREES and the arm stalled against an
+   invisible joint limit at 0.07 rad. `<compiler angle="radian"/>`.
+3. A held block slid ~3.5 cm out of the pads during a gentle transport and was dropped. Friction coefficient, torsional
+   friction and grip force made no difference; contact softness did (default `solref` 0.02 s is far too soft for grasping).
+   Stiffer contacts (0.005 s) cut the slip to ~8 mm, and 7 cm-wide pads make the remainder harmless.
+4. A velocity-only setpoint limit still jerked the block (it pitched ~18 degrees in the pads at the start of a transport);
+   added an acceleration limit (trapezoidal profile).
+5. System 2 stopped at its first `DONE`, which could be published a moment before System 1 finished its retreat and was
+   therefore (correctly) rejected as stale - System 1 never finished. System 2 now keeps republishing a terminal result
+   (`republish_terminal`) until the host stops it.
+
+**Known limits, stated plainly:** the scene is deliberately simple (one block, a colour-blob "perception", a gripper that is
+a pair of sliding pads, a 3-joint planar arm solved in closed form with the gripper fixed pointing down); 100 Hz real-time
+pacing means each run takes as long as it simulates; the Python side of the seqlock still relies on aligned 8-byte
+accesses not tearing (documented since M1); fault injection (a hung System 2) is exercised only lightly here and is the
+whole point of M5.
 
 ## M5 — Fault injection + the deadline/observability proof
 

@@ -92,9 +92,15 @@ def test_reach_when_block_is_elsewhere(scene):
     assert abs(out.x - 0.55) < 0.01 and abs(out.z - 0.02) < 0.01
 
 
-def test_place_once_the_end_effector_is_at_the_block(scene):
+def test_still_reach_when_the_end_effector_is_at_the_block_but_not_holding(scene):
     f = _fresh(scene, red=(0.55, 0.02)).frame()
-    out = ScriptedReasoner(scene.cam).plan(f, INSTR, Proprioception(0.56, 0.03))
+    out = ScriptedReasoner(scene.cam).plan(f, INSTR, Proprioception(0.56, 0.03, holding=False))
+    assert isinstance(out, Subgoal) and out.kind == "reach"
+
+
+def test_place_once_the_gripper_is_holding(scene):
+    f = _fresh(scene, red=(0.55, 0.02)).frame()
+    out = ScriptedReasoner(scene.cam).plan(f, INSTR, Proprioception(0.56, 0.03, holding=True))
     assert isinstance(out, Subgoal) and out.kind == "place"
     assert abs(out.x - 0.2) < 0.01 and abs(out.z - (0.02 + 0.02)) < 0.01      # platform top + block half-height
 
@@ -126,7 +132,7 @@ def test_same_scene_same_plan(scene):
 
 # ------------------------------------------------------------------------------------------------ goal format + loop
 def test_goal_roundtrip_and_size():
-    g = GoalState(7, GoalKind.PLACE, 0.25, 0.04, 123.5)
+    g = GoalState(7, GoalKind.PLACE, 0.25, 0.04, 123.5, frame_step=4321)
     assert len(g.encode()) == GOAL_PAYLOAD_SIZE == 40
     assert GoalState.decode(g.encode()) == g
     assert g.age(124.0) == pytest.approx(0.5)

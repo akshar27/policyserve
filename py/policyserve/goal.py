@@ -1,8 +1,10 @@
 """The goal that System 2 publishes and System 1 reads: one fixed-size record through the seqlock channel.
 
-Layout (little-endian, 40 bytes):  source_cycle u64 | kind u8 | 7 pad | x f64 | z f64 | updated_at f64
-``updated_at`` is a monotonic timestamp (seconds) so System 1 can tell how stale the goal is. M4 adds the matching Rust
-decoder; until then this Python encoding is the single definition of the format.
+Layout (little-endian, 40 bytes):  source_cycle u64 | kind u8 | 3 pad | frame_step u32 | x f64 | z f64 | updated_at f64
+``frame_step`` is the sim step at which the camera frame this goal was computed from was captured. System 1 uses it to
+refuse goals computed from a frame older than the moment it finished its last sequence (see src/task.rs), which is a causal
+ordering that needs no shared wall clock. ``updated_at`` is System 2's monotonic publish time (informational only: the Rust
+side measures staleness itself, by when it last saw ``source_cycle`` change). The matching Rust decoder is src/wire.rs.
 """
 
 from __future__ import annotations
@@ -11,7 +13,7 @@ import struct
 from dataclasses import dataclass
 from enum import IntEnum
 
-_GOAL = struct.Struct("<QB7xddd")
+_GOAL = struct.Struct("<QB3xIddd")
 GOAL_PAYLOAD_SIZE = _GOAL.size  # 40
 
 
@@ -30,14 +32,15 @@ class GoalState:
     x: float = 0.0
     z: float = 0.0
     updated_at: float = 0.0
+    frame_step: int = 0
 
     def encode(self) -> bytes:
-        return _GOAL.pack(self.source_cycle, int(self.kind), self.x, self.z, self.updated_at)
+        return _GOAL.pack(self.source_cycle, int(self.kind), self.frame_step & 0xFFFFFFFF, self.x, self.z, self.updated_at)
 
     @classmethod
     def decode(cls, data: bytes) -> "GoalState":
-        cycle, kind, x, z, ts = _GOAL.unpack(data)
-        return cls(cycle, GoalKind(kind), x, z, ts)
+        cycle, kind, step, x, z, ts = _GOAL.unpack(data)
+        return cls(cycle, GoalKind(kind), x, z, ts, step)
 
     def age(self, now: float) -> float:
         return now - self.updated_at
