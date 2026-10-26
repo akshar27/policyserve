@@ -73,6 +73,12 @@ struct Args {
     /// (control) per-tick compute budget; a controller step over this is discarded for the safe fallback.
     #[arg(long, default_value_t = 5000)]
     deadline_us: u64,
+    /// (control, fault injection) make every Nth controller call take `--inject-slow-us` extra; 0 = off.
+    #[arg(long, default_value_t = 0)]
+    inject_slow_every: u64,
+    /// (control, fault injection) extra delay per injected slow call, microseconds.
+    #[arg(long, default_value_t = 0)]
+    inject_slow_us: u64,
     /// Tick rate in Hz.
     #[arg(long, default_value_t = 100)]
     rate_hz: u64,
@@ -103,6 +109,8 @@ fn main() {
                 rate_hz: args.rate_hz,
                 duration_secs: args.duration_secs,
                 deadline_us: args.deadline_us,
+                inject_slow_every: args.inject_slow_every,
+                inject_slow_us: args.inject_slow_us,
             });
             println!("{}", summary.to_json());
         }

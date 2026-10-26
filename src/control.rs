@@ -5,10 +5,13 @@
 //! The loop is deliberately ignorant of System 2: it sees a goal record and how long ago its `source_cycle` last changed. If
 //! System 2 hangs, the record just stops changing, the age grows, and this loop keeps ticking at its own rate on the last good
 //! goal (`max_goal_age_s` in the summary shows how long that went on; M5 turns that into the headline test).
+//! M5 also adds the loop's own steadiness (`loop_dt_ns_*`) and the `--inject-slow-*` hook that deliberately blows the tick budget.
 
 use std::time::{Duration, Instant};
 
-use crate::controller::{JointConfig, NUM_JOINTS, ProportionalController, SafeController};
+use crate::controller::{
+    JointConfig, NUM_JOINTS, ProportionalController, SafeController, SlowEvery,
+};
 use crate::kinematics::ik;
 use crate::shm::SeqLockChannel;
 use crate::task::{Observation, Phase, Task, TaskConfig};
@@ -21,6 +24,9 @@ pub struct ControlArgs {
     pub rate_hz: u64,
     pub duration_secs: f64,
     pub deadline_us: u64,
+    /// Fault injection: slow every Nth controller call by `inject_slow_us` (0 = off). See `SlowEvery`.
+    pub inject_slow_every: u64,
+    pub inject_slow_us: u64,
 }
 
 pub struct Summary {
@@ -30,6 +36,11 @@ pub struct Summary {
     pub tick_ns_p50: u64,
     pub tick_ns_p99: u64,
     pub tick_ns_max: u64,
+    /// Time between the starts of consecutive loop iterations: how steadily the loop actually ticked (target = 1/rate).
+    pub loop_dt_ns_p50: u64,
+    pub loop_dt_ns_p99: u64,
+    pub loop_dt_ns_max: u64,
+    pub injected_slow_ticks: u64,
     pub max_goal_age_s: f64,
     pub distinct_goals_seen: u64,
     pub final_phase: Phase,
@@ -59,10 +70,14 @@ pub fn run(args: &ControlArgs) -> Summary {
     let period = Duration::from_secs_f64(1.0 / args.rate_hz as f64);
     let run_for = Duration::from_secs_f64(args.duration_secs);
     let controller = SafeController::new(
-        ProportionalController {
-            kp: 8.0,
-            max_velocity: 2.5,
-        },
+        SlowEvery::new(
+            ProportionalController {
+                kp: 8.0,
+                max_velocity: 2.5,
+            },
+            args.inject_slow_every,
+            Duration::from_micros(args.inject_slow_us),
+        ),
         Duration::from_micros(args.deadline_us),
         [0.0; NUM_JOINTS], // safe fallback: hold still
     );
@@ -75,6 +90,8 @@ pub fn run(args: &ControlArgs) -> Summary {
     let mut max_goal_age = 0.0f64;
     let mut distinct_goals = 0u64;
     let mut tick_ns: Vec<u64> = Vec::new();
+    let mut loop_dt_ns: Vec<u64> = Vec::new();
+    let mut last_loop_start: Option<Instant> = None;
     let mut misses = 0u32;
     let mut ticks = 0u64;
     let mut last_q_target: JointConfig = [0.0; NUM_JOINTS];
@@ -82,6 +99,11 @@ pub fn run(args: &ControlArgs) -> Summary {
     let start = Instant::now();
     let mut next_tick = start + period;
     while start.elapsed() < run_for {
+        let loop_start = Instant::now();
+        if let Some(prev) = last_loop_start {
+            loop_dt_ns.push(loop_start.duration_since(prev).as_nanos() as u64);
+        }
+        last_loop_start = Some(loop_start);
         // ---- inputs: latest value wins, never blocks; a failed read keeps the previous value ----
         let mut pbuf = [0u8; PROPRIO_SIZE];
         if proprio_chan.read(&mut pbuf, 50) {
@@ -150,6 +172,7 @@ pub fn run(args: &ControlArgs) -> Summary {
     let _ = last_q_target;
 
     tick_ns.sort_unstable();
+    loop_dt_ns.sort_unstable();
     Summary {
         ticks,
         elapsed_secs: start.elapsed().as_secs_f64(),
@@ -157,6 +180,10 @@ pub fn run(args: &ControlArgs) -> Summary {
         tick_ns_p50: percentile(&tick_ns, 0.50),
         tick_ns_p99: percentile(&tick_ns, 0.99),
         tick_ns_max: tick_ns.last().copied().unwrap_or(0),
+        loop_dt_ns_p50: percentile(&loop_dt_ns, 0.50),
+        loop_dt_ns_p99: percentile(&loop_dt_ns, 0.99),
+        loop_dt_ns_max: loop_dt_ns.last().copied().unwrap_or(0),
+        injected_slow_ticks: controller.inner().injected(),
         max_goal_age_s: max_goal_age,
         distinct_goals_seen: distinct_goals,
         final_phase: task.phase(),
@@ -180,13 +207,17 @@ impl Summary {
             None => "null".to_string(),
         };
         format!(
-            "{{\"ticks\":{},\"elapsed_secs\":{:.3},\"deadline_misses\":{},\"tick_ns_p50\":{},\"tick_ns_p99\":{},\"tick_ns_max\":{},\"max_goal_age_s\":{:.3},\"distinct_goals_seen\":{},\"final_phase\":\"{}\",\"failure\":{},\"grasp_retries\":{},\"transitions\":[{}]}}",
+            "{{\"ticks\":{},\"elapsed_secs\":{:.3},\"deadline_misses\":{},\"tick_ns_p50\":{},\"tick_ns_p99\":{},\"tick_ns_max\":{},\"loop_dt_ns_p50\":{},\"loop_dt_ns_p99\":{},\"loop_dt_ns_max\":{},\"injected_slow_ticks\":{},\"max_goal_age_s\":{:.3},\"distinct_goals_seen\":{},\"final_phase\":\"{}\",\"failure\":{},\"grasp_retries\":{},\"transitions\":[{}]}}",
             self.ticks,
             self.elapsed_secs,
             self.deadline_misses,
             self.tick_ns_p50,
             self.tick_ns_p99,
             self.tick_ns_max,
+            self.loop_dt_ns_p50,
+            self.loop_dt_ns_p99,
+            self.loop_dt_ns_max,
+            self.injected_slow_ticks,
             self.max_goal_age_s,
             self.distinct_goals_seen,
             self.final_phase.name(),

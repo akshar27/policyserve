@@ -10,6 +10,7 @@
 //! Wired into the control loop (`control.rs`) in M4: the Cartesian setpoint from the task state machine goes through the
 //! closed-form IK in `kinematics.rs` to a joint target, and this controller turns that into joint velocities.
 
+use std::cell::Cell;
 use std::time::{Duration, Instant};
 
 /// Must match `py/policyserve/sim.py`'s `NUM_JOINTS` -- the two sides
@@ -47,6 +48,45 @@ impl JointController for ProportionalController {
     }
 }
 
+/// Fault injection (M5): makes every `every`-th `compute` call take an extra, real `delay`, so the deadline enforcement can be
+/// exercised inside the full closed loop with the real binary rather than assumed to work. `every == 0` disables it.
+pub struct SlowEvery<C: JointController> {
+    inner: C,
+    every: u64,
+    delay: Duration,
+    calls: Cell<u64>,
+    injected: Cell<u64>,
+}
+
+impl<C: JointController> SlowEvery<C> {
+    pub fn new(inner: C, every: u64, delay: Duration) -> Self {
+        Self {
+            inner,
+            every,
+            delay,
+            calls: Cell::new(0),
+            injected: Cell::new(0),
+        }
+    }
+
+    /// How many calls were actually slowed so far.
+    pub fn injected(&self) -> u64 {
+        self.injected.get()
+    }
+}
+
+impl<C: JointController> JointController for SlowEvery<C> {
+    fn compute(&self, target: &JointConfig, current: &JointConfig) -> JointConfig {
+        let n = self.calls.get() + 1;
+        self.calls.set(n);
+        if self.every > 0 && n.is_multiple_of(self.every) {
+            self.injected.set(self.injected.get() + 1);
+            std::thread::sleep(self.delay);
+        }
+        self.inner.compute(target, current)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StepResult {
     pub action: JointConfig,
@@ -73,6 +113,10 @@ impl<C: JointController> SafeController<C> {
             budget,
             safe_fallback,
         }
+    }
+
+    pub fn inner(&self) -> &C {
+        &self.inner
     }
 
     pub fn step(&self, target: &JointConfig, current: &JointConfig) -> StepResult {
@@ -187,6 +231,45 @@ mod tests {
             "reported duration ({:?}) should reflect the real injected delay",
             result.duration
         );
+    }
+
+    #[test]
+    fn slow_every_slows_exactly_every_nth_call_and_counts_them() {
+        let slow = SlowEvery::new(
+            ProportionalController {
+                kp: 1.0,
+                max_velocity: 1.0,
+            },
+            4,
+            Duration::from_millis(15),
+        );
+        let safe = SafeController::new(slow, Duration::from_millis(5), [0.0; NUM_JOINTS]);
+        let misses: Vec<bool> = (0..12)
+            .map(|_| {
+                safe.step(&[1.0, 0.0, 0.0], &[0.0; NUM_JOINTS])
+                    .missed_deadline
+            })
+            .collect();
+        let expect: Vec<bool> = (1..=12).map(|n| n % 4 == 0).collect();
+        assert_eq!(misses, expect);
+    }
+
+    #[test]
+    fn slow_every_zero_never_slows_anything() {
+        let slow = SlowEvery::new(
+            ProportionalController {
+                kp: 1.0,
+                max_velocity: 1.0,
+            },
+            0,
+            Duration::from_millis(50),
+        );
+        let t0 = Instant::now();
+        for _ in 0..20 {
+            slow.compute(&[1.0, 0.0, 0.0], &[0.0; NUM_JOINTS]);
+        }
+        assert!(t0.elapsed() < Duration::from_millis(40));
+        assert_eq!(slow.injected(), 0);
     }
 
     #[test]

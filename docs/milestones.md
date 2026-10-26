@@ -206,15 +206,55 @@ pacing means each run takes as long as it simulates; the Python side of the seql
 accesses not tearing (documented since M1); fault injection (a hung System 2) is exercised only lightly here and is the
 whole point of M5.
 
-## M5 — Fault injection + the deadline/observability proof
+## M5 — Fault injection + the deadline/observability proof ✅ (2026-10-26)
 
-- [ ] The single most important test in this project: System 2 is
-      artificially hung for several real seconds mid-task; System 1
-      must keep ticking at its target rate throughout, acting on its
-      last good goal, with no degradation.
-- [ ] A deadline-miss injection test for System 1 itself (artificially
-      slow a tick's compute) confirming the fallback path and the
-      metrics it should produce.
+- [x] The single most important test in this project: System 2 is artificially hung for several real seconds mid-task;
+      System 1 must keep ticking at its target rate throughout, acting on its last good goal, with no degradation.
+- [x] A deadline-miss injection test for System 1 itself (artificially slow a tick's compute) confirming the fallback path
+      and the metrics it should produce.
+
+**What exists.** `py/policyserve/faults.py`: `HangingReasoner` wraps the real reasoner and blocks for N real seconds inside
+`plan` when a trigger fires (while carrying the block, or on the Nth call), then answers from the frame it was handed
+*before* the hang, as stale as a real recovery would be. `src/controller.rs`: `SlowEvery` wraps the controller and makes
+every Nth call take an extra real delay (`--inject-slow-every` / `--inject-slow-us` on the binary). New observability:
+System 1's summary now has the loop's own interval stats (`loop_dt_ns_p50/p99/max`) and `injected_slow_ticks`; the host
+has an independent action-tap thread (~2 kHz) so System 1 can be judged from outside its own process.
+`py/tests/test_faults.py`, 3 tests, ~40 s, wall-clock.
+
+**Results** (3 consecutive full runs green after the tap fix; numbers from one run):
+
+| Run | Ticks during the fault | Loop interval p50 / p99 / max | Deadline misses | Outcome |
+|---|---|---|---|---|
+| System 2 hung 6.0 s while carrying the block | 599 in 6.01 s (100.0/s) | 9.99 / 12.46 / 14.08 ms | 0 | block never dropped; task finished (14.6 s sim) |
+| System 2 hung 5.0 s mid-approach | 499 in 5.01 s (100.0/s) | 10.00 / 12.29 / 12.51 ms | 0 | committed motion finished, task finished (15.1 s sim) |
+| every 25th compute +8 ms, 5 ms budget | 1007 ticks, 40 injected | max 12.5 ms | 40 = 40 injected | each replaced by zero velocity; task finished |
+
+Normal tick compute is a few microseconds (p99 8 us), so the 5 ms budget is never near; the injected overruns report 8.2-10 ms.
+`max_goal_age_s` was 6.49 s and 5.51 s: System 1 really did sit on a goal that stopped changing for that long.
+
+**Assertions that carry the claim:** tick counter advanced 100/s +-3% across the hang window, measured from outside; loop
+interval p99 under 15 ms and max under 60 ms; 0 deadline misses; end effector moved under 4 mm over the last 3 s of the
+hang and stayed in `wait_goal`; while carrying, the pad gap stayed in the hold band and the block stayed off the table; after
+recovery the full phase order completes with 0 grasp retries. The stale post-hang answer is ignored by the freshness rule
+(`frame_step` older than the end of the last sequence) instead of being obeyed.
+
+**Checks that the tests can fail:** with the budget raised to 20 ms and the same 8 ms injection, 40 overruns are injected
+and 0 are counted as misses, so the `misses == injected` assertion is not a tautology.
+
+**Findings (real, from building this):**
+1. **My first host-side check of the fallback was wrong, not the fallback.** The sim host reads the action channel at 100 Hz,
+   phase-locked to System 1's 100 Hz writes, and it systematically missed the late-written slow actions (it saw 2 of 40, always
+   500 ticks apart), so an assertion on what it read failed most runs. A separate ~2 kHz tap thread sees them; it catches
+   about a quarter of the slow actions because the next tick overwrites a slow one quickly, which is why the test needs only 3.
+2. **`wait_goal` has no timeout, by design.** A hung System 2 leaves System 1 holding position indefinitely; only the other
+   phases fail after 12 s. In simulation that is the safe choice. On hardware it should become a watchdog that parks or
+   opens the gripper after a bound, which this project does not do.
+3. A hang that crosses a sequence boundary is the interesting case: the answer System 2 returns afterwards was computed from
+   a pre-hang frame, and it is rejected by the freshness rule. That rule was written in M4; M5 is the first test that
+   exercises it against a multi-second stall.
+
+**Intentionally not covered:** a hung System 1 (the sim host would keep applying its last action, which is a different
+failure with a different answer), shared-memory corruption beyond the M1 torn-read test, and real-robot timing.
 
 ## M6 — HTTP API + a minimal live viewer
 

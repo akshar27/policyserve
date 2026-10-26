@@ -57,21 +57,56 @@ class TaskResult:
     system1: dict                       # the JSON summary System 1 printed on exit
     system2_cycles: int
     system2_late_cycles: int
-    trace: list[tuple] = field(default_factory=list)   # (sim_time, phase, ee_x, ee_z, gap, block_x, block_z)
+    trace: list[tuple] = field(default_factory=list)   # (sim_time, phase, ee_x, ee_z, gap, block_x, block_z, wall)
+    # One entry per distinct action record the host read, in wall-clock terms (perf_counter), for judging System 1's behaviour
+    # from the outside: (wall, tick, phase code, deadline_misses, compute_ns, (v1, v2, v3))
+    action_log: list[tuple] = field(default_factory=list)
 
     def phases(self) -> list[str]:
         return [name for _, name in self.system1.get("transitions", [])]
+
+
+class _ActionTap:
+    """An independent observer of the action channel (M5): polls it much faster than the 100 Hz control loop and logs every
+    distinct action System 1 publishes. The host's own 100 Hz read is phase-locked to System 1's tick and systematically misses
+    some records (it never saw the late-written, deadline-missing ones), so judging System 1 from the outside needs its own reader.
+    Reads are stateless, so sharing the channel object with the host thread is safe."""
+
+    def __init__(self, channel, log: list, period_s: float = 0.0005):
+        self._ch, self._log, self._period = channel, log, period_s
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="action-tap", daemon=True)
+
+    def _run(self) -> None:
+        last = -1
+        while not self._stop.is_set():
+            raw = self._ch.read(5)
+            if raw is not None:
+                a = Action.decode(raw)
+                if a.tick != last:
+                    last = a.tick
+                    self._log.append((time.perf_counter(), a.tick, a.phase, a.deadline_misses, a.compute_ns, tuple(a.vel)))
+            time.sleep(self._period)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(2.0)
 
 
 class PickPlaceHost:
     def __init__(self, *, red_x: float = 0.45, blue_x: float = 0.32, platform_x: float = 0.15,
                  start_q: tuple[float, float, float] = (-1.0, 1.9, 0.3), rate_hz: int = 100, render_every: int = 10,
                  s2_period: float = 0.5, instruction: str = INSTRUCTION, reasoner=None, frame_size: tuple[int, int] = (640, 480),
-                 deadline_us: int = 5000):
+                 deadline_us: int = 5000, system1_args: tuple[str, ...] = ()):
         self.model = mujoco.MjModel.from_xml_path(str(MODEL_PATH))
         self.data = mujoco.MjData(self.model)
         self.rate_hz, self.render_every, self.s2_period = rate_hz, render_every, s2_period
         self.instruction, self.deadline_us = instruction, deadline_us
+        self.system1_args = tuple(system1_args)     # extra flags for the System 1 binary (M5: --inject-slow-*)
         self.platform_x = platform_x
         self.n_sub = max(1, round(1.0 / rate_hz / self.model.opt.timestep))
 
@@ -149,6 +184,8 @@ class PickPlaceHost:
         proc = None
         s2 = None
         trace: list[tuple] = []
+        action_log: list[tuple] = []
+        tap = _ActionTap(act_ch, action_log)
         try:
             goal_ch.write(GoalState(0, GoalKind.NONE).encode())
             act_ch.write(Action(0, (0.0, 0.0, 0.0), 1.0, 0, 0, 0, 0).encode())
@@ -159,12 +196,13 @@ class PickPlaceHost:
                 [str(system1_binary()), "--mode", "control", "--goal-channel", goal_ch._shm.name,
                  "--proprio-channel", prop_ch._shm.name, "--action-channel", act_ch._shm.name,
                  "--rate-hz", str(self.rate_hz), "--duration-secs", str(timeout_sim_s * 2 + 30),
-                 "--deadline-us", str(self.deadline_us)],
+                 "--deadline-us", str(self.deadline_us), *self.system1_args],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
             s2 = System2Loop(self.reasoner, self._frame, self._proprio, self.instruction, goal_ch,
                              period_s=self.s2_period, step_fn=self._frame_step, republish_terminal=True)
             s2.start()
+            tap.start()
 
             period = 1.0 / self.rate_hz
             wall0 = time.perf_counter()
@@ -197,7 +235,7 @@ class PickPlaceHost:
                     self._snapshot()
                     bx, bz = self.red_block()
                     ee = self.ee()
-                    trace.append((self.data.time, PHASES[a.phase] if a else "-", ee[0], ee[1], self.gap(), bx, bz))
+                    trace.append((self.data.time, PHASES[a.phase] if a else "-", ee[0], ee[1], self.gap(), bx, bz, time.perf_counter()))
                 prop_ch.write(self._proprio_record(0))
                 if realtime:
                     delay = wall0 + tick * period - time.perf_counter()
@@ -205,6 +243,7 @@ class PickPlaceHost:
                         time.sleep(delay)
             sim_time, wall = float(self.data.time), time.perf_counter() - wall0
         finally:
+            tap.stop()
             if s2 is not None:
                 s2.stop()
             summary: dict = {}
@@ -226,7 +265,8 @@ class PickPlaceHost:
         return TaskResult(
             success=bool(on_platform and not self.holding() and s2.status == "done"),
             sim_time=sim_time, wall_time=wall, system2_status=s2.status, system2_failure=s2.last_failure,
-            red_block=(bx, bz), system1=summary, system2_cycles=s2.cycle, system2_late_cycles=s2.late_cycles, trace=trace)
+            red_block=(bx, bz), system1=summary, system2_cycles=s2.cycle, system2_late_cycles=s2.late_cycles, trace=trace,
+            action_log=action_log)
 
     def _proprio_record(self, flags: int) -> bytes:
         d = self.data
