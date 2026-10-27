@@ -289,11 +289,37 @@ interval p50 9.9 / p99 12.5 / max 18.7 ms, 0 deadline misses; System 2's longest
 **Limits (deliberate):** one scene and one instruction shape (red block onto the green platform; anything else is a 400), one task at a
 time, no authentication (binds to localhost), tick-interval resolution about 1 ms, task history kept in memory (last 50).
 
-## M7 — The real LLMReasoner + polish
+## M7 — The real LLMReasoner + polish — DONE
 
-- [ ] `LLMReasoner`: a real multimodal LLM call (frame + instruction +
-      structured-output prompt) implementing the same `Reasoner`
-      interface as the scripted one, opt-in via config.
-- [ ] Docker Compose demo, CI, README (architecture, quickstart, a real
-      screenshot/gif of a completed task, design decisions & tradeoffs,
-      what's out of scope), `docs/resume-bullets.md`.
+- [x] `LLMReasoner` (`py/policyserve/reasoner_llm.py`): a real multimodal call (frame + instruction + scene facts, one forced tool call
+      choosing `reach` / `place` / `done` / `fail`) behind the same `Reasoner` interface; opt-in with `POST /tasks {"reasoner": "llm"}`
+      and `ANTHROPIC_API_KEY`. The model never produces coordinates (they come from the colour-blob perception); every output is validated
+      before it can reach System 1; the instruction is treated as untrusted text; no retries, an 8 s timeout and a per-task call budget.
+- [x] Docker: a two-stage `Dockerfile` (Rust build, then Python + OSMesa), `docker-compose.yml` (published on loopback only), a
+      healthcheck, and `scripts/smoke.sh`, which runs one real task against a server and checks the numbers.
+- [x] CI (`.github/workflows/ci.yml`): Rust fmt / clippy `-D warnings` / tests, the Python suite with the real binary, and a Docker job that
+      builds the image and runs the smoke test. Not yet run on GitHub (the repo has not been pushed).
+- [x] README rewritten (architecture diagram, measured claim, quickstart, design decisions and tradeoffs, bugs found, out of scope).
+- [x] Tests: `py/tests/test_llm.py` (23): request shape, grounding agrees with the scripted reasoner, every kind of bad model output is
+      refused, `done` only when the geometry agrees, a hostile instruction cannot get an invalid goal through, call budget, usage stats, a
+      failing/timing-out model is contained by System 2's loop, a full closed-loop task with a slow stand-in model, API opt-in rules; plus one
+      live-model test that is skipped without a key.
+
+**Verified on Linux (arm64 Docker):** Rust fmt + clippy + 22 tests; the Python suite (69 passed, 1 skipped = the live-model test); an
+undisturbed task through the container: 100.0 Hz, tick p50 10.0 / p99 14.4 ms, 0 deadline misses; `docker compose up` healthy.
+
+**NOT verified:** a run against a live model (no key was available); x86 Linux and the GitHub Actions workflow (not pushed); real hardware.
+
+**Real problems found by running it in the container:**
+1. An installed (non-editable) copy of the package did not contain the MuJoCo scene XML or the viewer page, and looked for the Rust binary
+   relative to a repo checkout. Fixed with `package-data` and `POLICYSERVE_SYSTEM1`.
+2. About one run in five failed in the image: the frame System 2 received was corrupted (spatially wrapped, red/blue/green channels
+   swapped), so it saw a block that was not there and re-issued a reach after the task had finished. Cause: each host's offscreen
+   render context was left to the garbage collector, which destroyed it in the middle of the next run; with software GL (OSMesa) that
+   corrupts the active context. It never showed on macOS. Fix: `PickPlaceHost.close()`, called at the end of every run. Before: 1 failure
+   in 4-6 plain runs. After: 0 in 25. The API server is exposed to the same bug (a new host per task), so this was a real product fix
+   and has a regression test.
+3. The deadline-fallback test that "saw too few over-budget ticks" on Linux was the same corruption, not a timing problem in System 1.
+4. A weak test of mine: a mutation that removed the unknown-action check was not caught, because an unknown action with a valid colour
+   fell through into `done` (accepted if the block really was on the platform). Added the test.
+

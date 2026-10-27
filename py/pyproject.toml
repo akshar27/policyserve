@@ -11,9 +11,16 @@ dependencies = [
     "httpx>=0.27",
 ]
 
+[project.optional-dependencies]
+llm = ["anthropic>=0.40"]   # the opt-in LLMReasoner
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["policyserve*"]
+
+# The MuJoCo scenes and the viewer page are read from disk at runtime, so an installed (non-editable) copy must carry them.
+[tool.setuptools.package-data]
+policyserve = ["models/*.xml", "viewer/*.html"]

@@ -12,6 +12,7 @@ the simulation lag in wall-clock terms without changing what the controller comp
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
 import time
@@ -39,6 +40,9 @@ BLOCK_HALF = 0.02
 
 
 def system1_binary() -> Path:
+    override = os.environ.get("POLICYSERVE_SYSTEM1")      # for installed copies (the Docker image), where there is no repo checkout
+    if override:
+        return Path(override)
     for profile in ("release", "debug"):
         p = REPO_ROOT / "target" / profile / "system1"
         if p.exists():
@@ -140,6 +144,13 @@ class PickPlaceHost:
         self.action_log: list[tuple] = []   # the live list the action tap appends to (also returned in TaskResult)
         self._phase = "-"
         self._abort = threading.Event()
+
+    def close(self) -> None:
+        """Free the offscreen GL context now, on the thread that created it. Left to the garbage collector it is destroyed at an
+        arbitrary later moment, possibly in the middle of the NEXT run, and with software GL (OSMesa, as in the Docker image) that
+        corrupts the active context: frames came back wrapped and with swapped colour channels, System 2 saw a block that was not
+        there, and one run in four or five failed. Hosts are single-use, so run() calls this itself."""
+        self.renderer.close()
 
     def abort(self) -> None:
         """Ask a running ``run()`` to stop at the next tick (used on server shutdown)."""
@@ -277,6 +288,7 @@ class PickPlaceHost:
                     raise
             for ch in channels:
                 ch.close(unlink=True)
+            self.close()
 
         bx, bz = self.red_block()
         on_platform = abs(bx - self.platform_x) <= PLATFORM_HALF_X - 0.02 and bz >= PLATFORM_TOP + BLOCK_HALF - 0.005

@@ -1,0 +1,12 @@
+# docker compose up --build   ->   http://127.0.0.1:8000
+services:
+  policyserve:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"      # no authentication: published on the host's loopback only
+    environment:
+      # Optional: enables {"reasoner": "llm"}. Without it the scripted reasoner is the only choice.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      POLICYSERVE_LLM_MODEL: ${POLICYSERVE_LLM_MODEL:-claude-haiku-5-5}
+    shm_size: "256m"
+    restart: unless-stopped

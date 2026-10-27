@@ -6,6 +6,7 @@ protocol is correct within one process; this one proves it's correct
 across the process/language boundary this whole project is built on.
 """
 
+import os
 import json
 import subprocess
 import threading
@@ -22,6 +23,8 @@ DURATION_SECS = 2.0
 
 
 def _system1_binary() -> Path:
+    if os.environ.get("POLICYSERVE_SYSTEM1"):          # installed copy (Docker image): no repo checkout to look in
+        return Path(os.environ["POLICYSERVE_SYSTEM1"])
     release = REPO_ROOT / "target" / "release" / "system1"
     debug = REPO_ROOT / "target" / "debug" / "system1"
     if release.exists():

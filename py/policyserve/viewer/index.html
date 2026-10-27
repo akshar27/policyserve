@@ -45,6 +45,10 @@
       <h2>Start a task</h2>
       <div class="row">
         <input id="instruction" maxlength="200" value="pick up the red block and place it on the green platform" aria-label="Instruction">
+        <select id="reasoner" aria-label="Reasoner">
+          <option value="scripted">Scripted reasoner</option>
+          <option value="llm">LLM reasoner (needs an API key)</option>
+        </select>
         <select id="fault" aria-label="Fault to inject">
           <option value="">No fault</option>
           <option value="hang">Hang System 2 for 6 s while carrying</option>
@@ -140,7 +144,7 @@ async function health() {
 setInterval(health, 1000); health();
 
 $("start").onclick = async () => {
-  const body = { instruction: $("instruction").value };
+  const body = { instruction: $("instruction").value, reasoner: $("reasoner").value };
   const f = $("fault").value;
   if (f === "hang") body.faults = { system2_hang_s: 6 };
   if (f === "slow") body.faults = { system1_slow_every: 10, system1_slow_us: 8000 };

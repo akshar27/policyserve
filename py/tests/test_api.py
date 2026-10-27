@@ -211,3 +211,16 @@ def test_live_stream_during_a_system_2_hang_shows_system_1_unaffected(live):
     assert s1["deadline_misses_total"] == 0
     assert s1["observed_hz"] >= 95
     assert s1["tick_interval_ms"]["max"] < 60, "no stall anywhere in the run"
+
+
+def test_a_run_frees_its_gl_context_instead_of_leaving_it_to_the_garbage_collector():
+    """Regression (found in the Docker image): a render context destroyed by the GC in the middle of the next run corrupted software-GL
+    frames (wrapped, colour channels swapped) and made about one run in five fail. Hosts are single-use and must close it themselves."""
+    from policyserve.host import PickPlaceHost
+
+    host = PickPlaceHost()
+    host.abort()                                   # end the run at once: this test is about cleanup, not the task
+    host.run()
+    with pytest.raises(Exception):
+        host.renderer.render()                     # a closed renderer cannot render
+    host.close()                                   # and closing again is harmless

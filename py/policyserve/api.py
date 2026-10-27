@@ -24,6 +24,9 @@ import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
+
+import os
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request
@@ -33,6 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .faults import HangingReasoner, once_holding
 from .host import INSTRUCTION, PickPlaceHost
 from .reasoner import parse_instruction
+from .reasoner_llm import LLMReasoner
 
 VIEWER = Path(__file__).parent / "viewer" / "index.html"
 STALL_AFTER_S = 0.5          # System 1 counts as stalled if a running task's action channel has not advanced for this long
@@ -56,6 +60,7 @@ class Faults(BaseModel):
 class TaskRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     instruction: str = Field(min_length=1, max_length=200)
+    reasoner: Literal["scripted", "llm"] = Field("scripted", description="'llm' is opt-in: it calls a real model (needs ANTHROPIC_API_KEY) and costs money")
     faults: Faults | None = None
 
 
@@ -107,6 +112,7 @@ class Task:
     id: str
     instruction: str
     faults: dict | None
+    reasoner: str = "scripted"
     status: str = "queued"                     # queued | running | succeeded | failed | aborted | error
     created: float = field(default_factory=time.time)
     started_wall: float | None = None          # perf_counter
@@ -125,10 +131,11 @@ class TaskManager:
     """Runs at most one task at a time, each on its own thread. The host is built and run on that thread because MuJoCo's offscreen
     renderer must stay on the thread that created it."""
 
-    def __init__(self, host_factory=PickPlaceHost):
+    def __init__(self, host_factory=PickPlaceHost, llm_factory=None):
         # Always paced to wall-clock: System 2 plans on a wall-clock cadence, so a simulation running faster than real time would
         # outrun it and System 1 would time out waiting for a goal.
         self._factory = host_factory
+        self._llm_factory = llm_factory      # camera -> LLMReasoner; tests inject a fake client here
         self._lock = threading.Lock()
         self._tasks: dict[str, Task] = {}
         self._order: list[str] = []
@@ -140,11 +147,14 @@ class TaskManager:
         self._thread: threading.Thread | None = None
 
     # ---- starting / running
-    def start(self, instruction: str, faults: Faults | None) -> Task:
+    def llm_available(self) -> bool:
+        return self._llm_factory is not None or bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+    def start(self, instruction: str, faults: Faults | None, reasoner: str = "scripted") -> Task:
         with self._lock:
             if self._current is not None and self._current.active:
                 raise Busy(self._current.id)
-            task = Task(uuid.uuid4().hex[:12], instruction, faults.model_dump(exclude_none=True) if faults else None)
+            task = Task(uuid.uuid4().hex[:12], instruction, faults.model_dump(exclude_none=True) if faults else None, reasoner)
             self._tasks[task.id] = task
             self._order.append(task.id)
             while len(self._order) > HISTORY:
@@ -165,6 +175,9 @@ class TaskManager:
             if "system1_slow_every" in f:
                 args = ("--inject-slow-every", str(f["system1_slow_every"]), "--inject-slow-us", str(f["system1_slow_us"]))
             host = self._factory(instruction=task.instruction, system1_args=args, on_snapshot=self._on_snapshot)
+            if task.reasoner == "llm":
+                host.reasoner = self._llm_factory(host.cam) if self._llm_factory else LLMReasoner(host.cam)
+                host.s2_period = 1.0        # a model call takes far longer than the scripted 0.5 s cycle; do not start every cycle late
             if "system2_hang_s" in f:
                 host.reasoner = HangingReasoner(host.reasoner, f["system2_hang_s"], once_holding)
             task.host = host
@@ -210,6 +223,9 @@ class TaskManager:
             "sim_time_s": round(snap["sim_time"], 3) if snap else (t.result or {}).get("sim_time_s"),
             "success": (t.result or {}).get("success"), "failure": (t.result or {}).get("system2", {}).get("failure") or t.error,
         }
+        out["reasoner"] = t.reasoner
+        if host is not None and hasattr(host.reasoner, "stats"):
+            out["llm"] = host.reasoner.stats() if not isinstance(host.reasoner, HangingReasoner) else host.reasoner.inner.stats()
         if t.result is not None:
             out["result"] = t.result
         return out
@@ -295,13 +311,17 @@ def create_app(manager: TaskManager | None = None) -> FastAPI:
     @app.post("/tasks", status_code=202)
     def post_task(req: TaskRequest):
         instruction = req.instruction.strip()
-        parsed = parse_instruction(instruction)
-        if parsed is None:
-            raise HTTPException(400, f"Could not understand the instruction. Try: {INSTRUCTION!r}")
-        if parsed != ("red", "green"):
-            raise HTTPException(400, "This scene only supports moving the red block onto the green platform.")
+        if req.reasoner == "llm":
+            if not mgr.llm_available():
+                raise HTTPException(400, "The LLM reasoner is not configured on this server (no ANTHROPIC_API_KEY).")
+        else:
+            parsed = parse_instruction(instruction)
+            if parsed is None:
+                raise HTTPException(400, f"Could not understand the instruction. Try: {INSTRUCTION!r}")
+            if parsed != ("red", "green"):
+                raise HTTPException(400, "This scene only supports moving the red block onto the green platform.")
         try:
-            task = mgr.start(instruction, req.faults)
+            task = mgr.start(instruction, req.faults, req.reasoner)
         except Busy as e:
             raise HTTPException(409, f"A task is already running ({e.args[0]}). Only one task runs at a time.")
         return {"task_id": task.id, "status": task.status}
