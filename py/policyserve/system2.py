@@ -47,6 +47,7 @@ class System2Loop:
         self.late_cycles = 0
         self.status = "idle"   # idle | running | done | failed | stopped
         self.last_failure: str | None = None
+        self.last_goal: dict | None = None   # what was last published, for observers (the HTTP API / viewer)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -72,6 +73,7 @@ class System2Loop:
         if isinstance(result, Subgoal) and result.kind in ("reach", "place") and math.isfinite(result.x) and math.isfinite(result.z):
             kind = GoalKind.REACH if result.kind == "reach" else GoalKind.PLACE
             self.channel.write(GoalState(self.cycle, kind, result.x, result.z, now, self._frame_step).encode())
+            self.last_goal = {"kind": result.kind, "x": result.x, "z": result.z}
             self.consecutive_failures = 0
             if self.republish_terminal:
                 self.status = "running"
@@ -80,11 +82,13 @@ class System2Loop:
             self.channel.write(GoalState(self.cycle, GoalKind.DONE, updated_at=now, frame_step=self._frame_step).encode())
             self.consecutive_failures = 0
             self.status = "done"
+            self.last_goal = {"kind": "done"}
             return "done"
         if isinstance(result, Failed):
             self.channel.write(GoalState(self.cycle, GoalKind.FAILED, updated_at=now, frame_step=self._frame_step).encode())
             self.last_failure = result.reason
             self.status = "failed"
+            self.last_goal = {"kind": "failed", "reason": result.reason}
             return "failed"
         self._fail(f"malformed reasoner output: {result!r}", now)
         return "malformed"

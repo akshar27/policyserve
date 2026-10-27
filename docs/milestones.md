@@ -256,13 +256,38 @@ and 0 are counted as misses, so the `misses == injected` assertion is not a taut
 **Intentionally not covered:** a hung System 1 (the sim host would keep applying its last action, which is a different
 failure with a different answer), shared-memory corruption beyond the M1 torn-read test, and real-robot timing.
 
-## M6 — HTTP API + a minimal live viewer
+## M6 — HTTP API + a minimal live viewer — DONE
 
-- [ ] `POST /tasks`, `GET /tasks/{id}`, `GET /metrics`
-      (p50/p95/p99/max + deadline-miss counts per loop), `GET /stream`
-      (SSE), `GET /healthz`.
-- [ ] A minimal live viewer: current sim frame, current goal, rolling
-      latency/deadline-miss readout, updating in real time.
+- [x] `POST /tasks` (202; 409 while one is running; 400 for an instruction it cannot parse; bounded optional `faults`),
+      `GET /tasks/{id}` (status, phase, current subgoal, result), `GET /metrics?window=` (p50/p95/p99/max tick interval and
+      controller-step time, observed Hz, deadline misses, System 2 cycle times), `GET /stream` (SSE, ~10 Hz: JPEG frame + goal +
+      timing), `GET /healthz` (503 `stalled` if a running task's action channel stops advancing for 0.5 s). `py/policyserve/api.py`.
+- [x] A single-file live viewer (`py/policyserve/viewer/index.html`, no build step): frame, goal, phase, rolling timing with a
+      tick-interval sparkline, and a form to start a task with or without an injected fault. All server text is inserted with
+      `textContent`, so a typed instruction cannot inject markup.
+- [x] Tests (`py/tests/test_api.py`, 8): input validation (nothing starts on a bad request), one-task-at-a-time, the full lifecycle on a
+      real run, injected slow steps show as deadline misses, fault options are really wired to the injectors, a crashed run is reported
+      and does not wedge the server, `/healthz` goes 503 on a stalled System 1, the timing maths, and one real-time end-to-end test that
+      reads the live stream during a 3 s System 2 hang.
+
+**How the numbers are obtained:** from the independent action tap added in M5 (polls the action channel ~1 ms, stamps every distinct
+record), so tick rate and interval are observed from outside System 1. Only `compute_us` is System 1's own measurement of its controller
+step. API reads never touch System 1 or the control thread: they read snapshots and logs the host already keeps; JPEG encoding runs on
+the request thread, once per frame however many viewers are connected.
+
+**A real run through the API (6 s System 2 hang while carrying):** task succeeded; System 1 observed at 99.9 Hz over the whole run, tick
+interval p50 9.9 / p99 12.5 / max 18.7 ms, 0 deadline misses; System 2's longest cycle 6041 ms (visible in the same readout).
+
+**Things found by building it:**
+1. A closed-loop run cannot be sped up. With `realtime=False` the simulation covered 12 s of sim time in 0.3 s, System 2 (wall-clock
+   cadence) could not keep up, and System 1 gave up waiting for a goal (`failed`). No earlier test ever disabled pacing, so this was never
+   exercised; the API always paces, and the option is not exposed.
+2. The controller step is tiny (p50 ~2 us against a 5 ms budget), so in normal operation the deadline machinery never fires. The
+   deadline numbers only mean something under injection, which is why the viewer has the fault buttons.
+3. The API has to build and run the host on one thread: MuJoCo's offscreen renderer must stay on the thread that created it.
+
+**Limits (deliberate):** one scene and one instruction shape (red block onto the green platform; anything else is a 400), one task at a
+time, no authentication (binds to localhost), tick-interval resolution about 1 ms, task history kept in memory (last 50).
 
 ## M7 — The real LLMReasoner + polish
 

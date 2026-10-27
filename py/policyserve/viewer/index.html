@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>policyserve</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#111827; --muted:#6b7280; --border:#e5e7eb; --good:#15803d; --bad:#b91c1c; --warn:#b45309; --accent:#2563eb; --line:#2563eb; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f1115; --card:#171a21; --text:#e5e7eb; --muted:#9ca3af; --border:#262b36; --good:#4ade80; --bad:#f87171; --warn:#fbbf24; --accent:#60a5fa; --line:#60a5fa; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 system-ui,-apple-system,sans-serif; }
+  header { display:flex; align-items:center; gap:12px; padding:14px 20px; border-bottom:1px solid var(--border); background:var(--card); }
+  h1 { font-size:18px; margin:0; }
+  .pill { padding:2px 10px; border-radius:999px; font-size:12px; font-weight:600; border:1px solid var(--border); }
+  .ok { color:var(--good); } .bad { color:var(--bad); } .warn { color:var(--warn); }
+  main { display:grid; grid-template-columns: minmax(0,1.2fr) minmax(0,1fr); gap:16px; padding:16px 20px; max-width:1200px; margin:0 auto; }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:14px; margin-bottom:16px; }
+  .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 10px; }
+  #frame { width:100%; border-radius:8px; background:#000; aspect-ratio:4/3; object-fit:contain; display:block; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  input, select, button { font:inherit; padding:8px 10px; border-radius:8px; border:1px solid var(--border); background:var(--card); color:var(--text); }
+  input { flex:1 1 280px; }
+  button { background:var(--accent); color:#fff; border-color:var(--accent); cursor:pointer; font-weight:600; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  table { width:100%; border-collapse:collapse; } td { padding:3px 0; } td:last-child { text-align:right; font-variant-numeric:tabular-nums; }
+  td:first-child { color:var(--muted); }
+  canvas { width:100%; height:90px; display:block; }
+  #msg { margin-top:8px; min-height:1.4em; }
+  small { color:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>policyserve</h1>
+  <span id="health" class="pill">connecting…</span>
+  <small>System 1 (Rust, 100 Hz) keeps ticking while System 2 (Python, ~2 Hz) thinks.</small>
+</header>
+<main>
+  <section>
+    <div class="card">
+      <img id="frame" alt="Live simulation frame">
+    </div>
+    <div class="card">
+      <h2>Start a task</h2>
+      <div class="row">
+        <input id="instruction" maxlength="200" value="pick up the red block and place it on the green platform" aria-label="Instruction">
+        <select id="fault" aria-label="Fault to inject">
+          <option value="">No fault</option>
+          <option value="hang">Hang System 2 for 6 s while carrying</option>
+          <option value="slow">Make every 10th System 1 step slow</option>
+        </select>
+        <button id="start">Start</button>
+      </div>
+      <div id="msg" role="status"></div>
+    </div>
+  </section>
+  <section>
+    <div class="card"><h2>Task</h2>
+      <table>
+        <tr><td>Status</td><td id="t-status">–</td></tr>
+        <tr><td>Phase (System 1)</td><td id="t-phase">–</td></tr>
+        <tr><td>Subgoal (System 2)</td><td id="t-goal">–</td></tr>
+        <tr><td>Sim time</td><td id="t-sim">–</td></tr>
+        <tr><td>Holding block</td><td id="t-hold">–</td></tr>
+      </table>
+    </div>
+    <div class="card"><h2>System 1 timing <small id="m-scope"></small></h2>
+      <table>
+        <tr><td>Observed tick rate</td><td id="s1-hz">–</td></tr>
+        <tr><td>Tick interval p50 / p99 / max</td><td id="s1-dt">–</td></tr>
+        <tr><td>Controller step p50 / p99 / max</td><td id="s1-cu">–</td></tr>
+        <tr><td>Deadline misses (total / this window)</td><td id="s1-miss">–</td></tr>
+      </table>
+      <canvas id="spark" width="600" height="90" aria-label="Recent tick intervals"></canvas>
+      <small>Tick interval per control tick, last ~1.5 s; dotted line = 10 ms (100 Hz). Observed from outside System 1, resolution about 1 ms.</small>
+    </div>
+    <div class="card"><h2>System 2</h2>
+      <table>
+        <tr><td>Cycles / late cycles / failures</td><td id="s2-n">–</td></tr>
+        <tr><td>Cycle duration p50 / max</td><td id="s2-d">–</td></tr>
+      </table>
+    </div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const fmt = (v, d = 1) => (v === null || v === undefined ? "–" : Number(v).toFixed(d));
+const trio = (p, d = 1) => (p && p.n ? `${fmt(p.p50, d)} / ${fmt(p.p99, d)} / ${fmt(p.max, d)}` : "–");
+const say = (text, cls = "") => { $("msg").textContent = text; $("msg").className = cls; };
+
+function drawSpark(series) {
+  const c = $("spark"), g = c.getContext("2d"), w = c.width, h = c.height;
+  g.clearRect(0, 0, w, h);
+  const top = 25;                                   // ms at the top edge; anything above is clipped to the edge
+  const y = (ms) => h - Math.min(ms, top) / top * (h - 4) - 2;
+  const css = getComputedStyle(document.documentElement);
+  g.strokeStyle = css.getPropertyValue("--muted"); g.setLineDash([3, 4]); g.beginPath(); g.moveTo(0, y(10)); g.lineTo(w, y(10)); g.stroke(); g.setLineDash([]);
+  if (!series.length) return;
+  g.strokeStyle = css.getPropertyValue("--line"); g.lineWidth = 1.5; g.beginPath();
+  series.forEach((v, i) => { const x = i / Math.max(series.length - 1, 1) * w; i ? g.lineTo(x, y(v)) : g.moveTo(x, y(v)); });
+  g.stroke();
+}
+
+function render(s) {
+  const t = s.task;
+  $("t-status").textContent = t ? t.status : "idle";
+  $("t-phase").textContent = t && t.phase ? t.phase : "–";
+  const g = t && t.subgoal;
+  $("t-goal").textContent = !g ? "–" : g.kind === "reach" || g.kind === "place" ? `${g.kind} (x ${fmt(g.x, 3)}, z ${fmt(g.z, 3)})` : g.kind + (g.reason ? `: ${g.reason}` : "");
+  $("t-sim").textContent = t && t.sim_time_s != null ? `${fmt(t.sim_time_s, 2)} s` : "–";
+  $("t-hold").textContent = s.holding === undefined ? "–" : s.holding ? "yes" : "no";
+  const m = s.metrics;
+  if (m) {
+    $("m-scope").textContent = m.scope ? `(${m.scope})` : "(last 5 s)";
+    $("s1-hz").textContent = m.system1.observed_hz ? `${fmt(m.system1.observed_hz, 1)} Hz` : "–";
+    $("s1-dt").textContent = trio(m.system1.tick_interval_ms, 1) + " ms";
+    $("s1-cu").textContent = trio(m.system1.compute_us, 0) + " µs";
+    $("s1-miss").textContent = `${m.system1.deadline_misses_total} / ${m.system1.deadline_misses_in_window}`;
+    $("s2-n").textContent = `${m.system2.cycles} / ${m.system2.late_cycles} / ${m.system2.failures}`;
+    $("s2-d").textContent = m.system2.cycle_duration_ms.n ? `${fmt(m.system2.cycle_duration_ms.p50, 1)} / ${fmt(m.system2.cycle_duration_ms.max, 1)} ms` : "–";
+  }
+  drawSpark(s.tick_dt_ms || []);
+  const running = t && (t.status === "running" || t.status === "queued");
+  $("start").disabled = !!running;
+  if (t && !running && t.status !== "idle") say(t.status === "succeeded" ? "Task succeeded." : `Task ${t.status}${t.failure ? ": " + t.failure : ""}.`, t.status === "succeeded" ? "ok" : "bad");
+}
+
+const es = new EventSource("/stream");
+es.addEventListener("state", (e) => { const s = JSON.parse(e.data); if (s.frame) $("frame").src = s.frame; render(s); });
+es.onerror = () => { $("health").textContent = "disconnected"; $("health").className = "pill bad"; };
+
+async function health() {
+  try {
+    const r = await fetch("/healthz"); const h = await r.json();
+    $("health").textContent = h.status === "ticking" ? `System 1 ticking (${fmt(h.system1.observed_hz, 0)} Hz)` : h.status;
+    $("health").className = "pill " + (h.ok ? "ok" : "bad");
+  } catch { $("health").textContent = "server unreachable"; $("health").className = "pill bad"; }
+}
+setInterval(health, 1000); health();
+
+$("start").onclick = async () => {
+  const body = { instruction: $("instruction").value };
+  const f = $("fault").value;
+  if (f === "hang") body.faults = { system2_hang_s: 6 };
+  if (f === "slow") body.faults = { system1_slow_every: 10, system1_slow_us: 8000 };
+  say("Starting…");
+  try {
+    const r = await fetch("/tasks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const j = await r.json();
+    if (!r.ok) return say(typeof j.detail === "string" ? j.detail : "The server rejected that request.", "bad");
+    say("Running…");
+  } catch { say("Could not reach the server.", "bad"); }
+};
+</script>
+</body>
+</html>

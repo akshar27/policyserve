@@ -61,6 +61,7 @@ class TaskResult:
     # One entry per distinct action record the host read, in wall-clock terms (perf_counter), for judging System 1's behaviour
     # from the outside: (wall, tick, phase code, deadline_misses, compute_ns, (v1, v2, v3))
     action_log: list[tuple] = field(default_factory=list)
+    aborted: bool = False
 
     def phases(self) -> list[str]:
         return [name for _, name in self.system1.get("transitions", [])]
@@ -101,7 +102,7 @@ class PickPlaceHost:
     def __init__(self, *, red_x: float = 0.45, blue_x: float = 0.32, platform_x: float = 0.15,
                  start_q: tuple[float, float, float] = (-1.0, 1.9, 0.3), rate_hz: int = 100, render_every: int = 10,
                  s2_period: float = 0.5, instruction: str = INSTRUCTION, reasoner=None, frame_size: tuple[int, int] = (640, 480),
-                 deadline_us: int = 5000, system1_args: tuple[str, ...] = ()):
+                 deadline_us: int = 5000, system1_args: tuple[str, ...] = (), on_snapshot=None):
         self.model = mujoco.MjModel.from_xml_path(str(MODEL_PATH))
         self.data = mujoco.MjData(self.model)
         self.rate_hz, self.render_every, self.s2_period = rate_hz, render_every, s2_period
@@ -133,6 +134,16 @@ class PickPlaceHost:
         self._lock = threading.Lock()
         self._snap: dict = {}
         self._grip_open_cmd = 1.0
+        # Hooks for observers such as the HTTP API (M6). All of these are written by the run only and read-only for everyone else.
+        self.on_snapshot = on_snapshot      # called from the host thread with the new snapshot; must return quickly
+        self.system2: System2Loop | None = None
+        self.action_log: list[tuple] = []   # the live list the action tap appends to (also returned in TaskResult)
+        self._phase = "-"
+        self._abort = threading.Event()
+
+    def abort(self) -> None:
+        """Ask a running ``run()`` to stop at the next tick (used on server shutdown)."""
+        self._abort.set()
 
     # ------------------------------------------------------------------ measurements (host thread only)
     def gap(self) -> float:
@@ -157,8 +168,13 @@ class PickPlaceHost:
         self.renderer.update_scene(self.data, camera="front")
         frame = self.renderer.render().copy()
         ee = self.ee()
+        bx, bz = self.red_block()
+        snap = {"frame": frame, "step": self.step_count(), "ee": ee, "holding": self.holding(), "sim_time": float(self.data.time),
+                "phase": self._phase, "block": (bx, bz), "gap": self.gap()}
         with self._lock:
-            self._snap = {"frame": frame, "step": self.step_count(), "ee": ee, "holding": self.holding()}
+            self._snap = snap
+        if self.on_snapshot is not None:
+            self.on_snapshot(snap)
 
     # ------------------------------------------------------------------ System 2's view of the world (other thread)
     def _frame(self) -> np.ndarray:
@@ -184,7 +200,7 @@ class PickPlaceHost:
         proc = None
         s2 = None
         trace: list[tuple] = []
-        action_log: list[tuple] = []
+        action_log = self.action_log = []
         tap = _ActionTap(act_ch, action_log)
         try:
             goal_ch.write(GoalState(0, GoalKind.NONE).encode())
@@ -201,6 +217,7 @@ class PickPlaceHost:
 
             s2 = System2Loop(self.reasoner, self._frame, self._proprio, self.instruction, goal_ch,
                              period_s=self.s2_period, step_fn=self._frame_step, republish_terminal=True)
+            self.system2 = s2
             s2.start()
             tap.start()
 
@@ -212,7 +229,7 @@ class PickPlaceHost:
             # end condition on its own: System 1 only accepts it once its last sequence (the retreat) has ended.
             settle_until = None
             a = None
-            while self.data.time < timeout_sim_s:
+            while self.data.time < timeout_sim_s and not self._abort.is_set():
                 if a is not None and a.phase_name in ("finished", "failed"):
                     break
                 if s2.status == "failed":
@@ -224,6 +241,7 @@ class PickPlaceHost:
                     a = Action.decode(raw)
                     self.data.ctrl[:3] = a.vel
                     self._grip_open_cmd = a.grip_open
+                    self._phase = PHASES[a.phase]
                     g = GRIP_OPEN_CTRL if a.grip_open >= 0.5 else GRIP_CLOSED_CTRL
                     self.data.ctrl[3:5] = g
                 else:
@@ -266,7 +284,7 @@ class PickPlaceHost:
             success=bool(on_platform and not self.holding() and s2.status == "done"),
             sim_time=sim_time, wall_time=wall, system2_status=s2.status, system2_failure=s2.last_failure,
             red_block=(bx, bz), system1=summary, system2_cycles=s2.cycle, system2_late_cycles=s2.late_cycles, trace=trace,
-            action_log=action_log)
+            action_log=action_log, aborted=self._abort.is_set())
 
     def _proprio_record(self, flags: int) -> bytes:
         d = self.data
